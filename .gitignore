@@ -1,0 +1,23 @@
+# Xcode
+build/
+*.xcuserdata/
+*.xcworkspace/
+DerivedData/
+*.pbxuser
+*.mode1v3
+*.mode2v3
+*.perspectivev3
+*.xccheckout
+*.moved-aside
+xcuserdata/
+
+# Swift Package Manager
+.build/
+Package.resolved
+
+# macOS
+.DS_Store
+*.swp
+
+# FluxCore.xcframework is built locally from ../flux/
+FluxCore.xcframework/
