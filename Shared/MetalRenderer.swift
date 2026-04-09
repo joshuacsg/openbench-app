@@ -28,7 +28,7 @@ public final class MetalRenderer {
     private let textureCache: CVMetalTextureCache
     public let metalLayer: CAMetalLayer
 
-    /// The most recently enqueued pixel buffer, waiting for the next
+    /// The most recently /Users/joshuachua/Documents/GitHub/openbench-app/Sharedenqueued pixel buffer, waiting for the next
     /// display refresh to present.
     private var pendingBuffer: CVPixelBuffer?
     private let lock = NSLock()
@@ -142,6 +142,11 @@ public final class MetalRenderer {
         blitEncoder.endEncoding()
         commandBuffer.present(drawable)
         commandBuffer.commit()
+
+        // Flush stale entries from the texture cache so CVPixelBuffer
+        // backing memory can be reclaimed. Without this the cache grows
+        // unbounded and the OS kills the app for memory pressure.
+        CVMetalTextureCacheFlush(textureCache, 0)
     }
 
     #if canImport(UIKit)

@@ -50,6 +50,7 @@ public final class FrameReassembler {
     }
 
     private var pending: [UInt16: PendingFrame] = [:] // frame_id → fragments
+    private var latestFrameId: UInt16 = 0
 
     public struct ReassembledFrame {
         public let data: Data       // complete Annex-B byte stream
@@ -70,6 +71,19 @@ public final class FrameReassembler {
 
         let fid = header.frameId
         let fidx = header.fragmentIdx
+
+        // Track the latest frame_id and evict stale incomplete frames.
+        // frame_id is a wrapping UInt16; consider a frame "stale" if it's
+        // more than 32 behind the latest (accounts for wrap-around).
+        if fid &- latestFrameId < 0x8000 { // fid is ahead
+            latestFrameId = fid
+        }
+        // Evict frames older than 32 frame_ids behind latest.
+        if pending.count > 8 {
+            pending = pending.filter { key, _ in
+                latestFrameId &- key < 32
+            }
+        }
 
         var frame = pending[fid] ?? PendingFrame(
             fragments: [:],

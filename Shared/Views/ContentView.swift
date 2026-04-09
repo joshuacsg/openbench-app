@@ -132,6 +132,15 @@ struct StreamView: View {
     /// Currently selected display ID (nil = Unified / host decides).
     @State private var selectedDisplayID: UInt32? = nil
 
+    /// Local cursor position in view coordinates (for software cursor overlay).
+    @State private var cursorPosition: CGPoint? = nil
+
+    /// Soft keyboard visibility toggle (iOS only).
+    @State private var showKeyboard = false
+
+    /// Paste modal visibility.
+    @State private var showPasteModal = false
+
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
@@ -144,7 +153,9 @@ struct StreamView: View {
 #if canImport(UIKit)
             InputCaptureViewRepresentable(
                 inputManager: inputManager,
-                canvasSize: session.canvasSize
+                canvasSize: session.canvasSize,
+                showKeyboard: showKeyboard,
+                onPointerMoved: { pt in cursorPosition = pt }  // nil hides cursor
             )
             .ignoresSafeArea()
 #elseif canImport(AppKit)
@@ -155,9 +166,22 @@ struct StreamView: View {
             .ignoresSafeArea()
 #endif
 
+#if canImport(UIKit)
+            // Software cursor for trackpad/mouse — rendered locally for
+            // zero-latency feedback since macOS hides the cursor from
+            // screen capture.
+            if let pos = cursorPosition {
+                CursorCrosshair()
+                    .frame(width: 20, height: 20)
+                    .position(x: pos.x, y: pos.y)
+                    .allowsHitTesting(false)
+                    .ignoresSafeArea()
+            }
+#endif
+
             // Status overlay
             VStack {
-                HStack {
+                HStack(spacing: 8) {
                     statusPill
 
                     // Display picker — only visible once the host reports displays.
@@ -171,6 +195,35 @@ struct StreamView: View {
                     }
 
                     Spacer()
+
+#if canImport(UIKit)
+                    // Keyboard toggle
+                    Button {
+                        showKeyboard.toggle()
+                    } label: {
+                        Image(systemName: "keyboard")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(showKeyboard ? .blue : .white.opacity(0.7))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(.ultraThinMaterial, in: Capsule())
+
+                    // Paste to host
+                    Button {
+                        showPasteModal = true
+                    } label: {
+                        Image(systemName: "doc.on.clipboard")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.white.opacity(0.7))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(.ultraThinMaterial, in: Capsule())
+#endif
+
                     Button {
                         session.disconnect()
                         dismiss()
@@ -187,7 +240,7 @@ struct StreamView: View {
             }
         }
         .onAppear {
-            session.connect(host: host.name, port: host.pixelPort)
+            session.connect(endpoint: host.endpoint, hostName: host.name)
 
             // Wire the InputManager's send callback to the session.
             inputManager.sendControl = { [weak session] message in
@@ -216,6 +269,21 @@ struct StreamView: View {
             TrustPromptView(prompt: prompt)
                 .presentationDetents([.medium])
         }
+        .sheet(isPresented: $showPasteModal) {
+            pasteModalContent
+                .presentationDetents([.medium])
+        }
+    }
+
+    @ViewBuilder
+    private var pasteModalContent: some View {
+#if canImport(UIKit)
+        PasteModalView { text in
+            inputManager.textInput(text)
+        }
+#else
+        EmptyView()
+#endif
     }
 
     private var statusPill: some View {
@@ -242,16 +310,50 @@ struct StreamView: View {
 
     private var statusText: String {
         switch session.state {
-        case .connected: "Connected · \(Int(session.stats.currentFps)) fps"
-        case .connecting: "Connecting…"
-        case .disconnected: "Disconnected"
-        case .failed(let msg): "Error: \(msg)"
+        case .connected:
+            let fps = Int(session.stats.currentFps)
+            let rtt = session.rttMs.map { " · \($0)ms" } ?? ""
+            return "\(fps) fps\(rtt)"
+        case .connecting: return "Connecting…"
+        case .disconnected: return "Disconnected"
+        case .failed: return "Reconnecting…"
         }
     }
 }
 
 #if canImport(UIKit)
 import UIKit
+
+// MARK: - Software cursor shape
+
+/// A crosshair cursor centered on the pointer position.
+struct CursorCrosshair: View {
+    var body: some View {
+        Canvas { ctx, size in
+            let mid = CGPoint(x: size.width / 2, y: size.height / 2)
+            let arm: CGFloat = size.width / 2 - 2
+            let gap: CGFloat = 1
+            var stroke = Path()
+            // Top
+            stroke.move(to: CGPoint(x: mid.x, y: mid.y - arm))
+            stroke.addLine(to: CGPoint(x: mid.x, y: mid.y - gap))
+            // Bottom
+            stroke.move(to: CGPoint(x: mid.x, y: mid.y + gap))
+            stroke.addLine(to: CGPoint(x: mid.x, y: mid.y + arm))
+            // Left
+            stroke.move(to: CGPoint(x: mid.x - arm, y: mid.y))
+            stroke.addLine(to: CGPoint(x: mid.x - gap, y: mid.y))
+            // Right
+            stroke.move(to: CGPoint(x: mid.x + gap, y: mid.y))
+            stroke.addLine(to: CGPoint(x: mid.x + arm, y: mid.y))
+
+            // Black outline for contrast on any background.
+            ctx.stroke(stroke, with: .color(.black), lineWidth: 2.5)
+            // White inner line.
+            ctx.stroke(stroke, with: .color(.white), lineWidth: 1)
+        }
+    }
+}
 
 // MARK: - iOS input capture representable
 
@@ -260,20 +362,24 @@ import UIKit
 struct InputCaptureViewRepresentable: UIViewRepresentable {
     let inputManager: InputManager
     let canvasSize: CGSize
+    var showKeyboard: Bool = false
+    var onPointerMoved: ((CGPoint?) -> Void)?
 
     func makeUIView(context: Context) -> InputCaptureView {
         let view = InputCaptureView()
         view.inputManager = inputManager
         view.canvasSize = canvasSize
+        view.showKeyboard = showKeyboard
+        view.onPointerMoved = onPointerMoved
         view.backgroundColor = .clear
-        // Become first responder so hardware keyboard events are received.
-        DispatchQueue.main.async { view.becomeFirstResponder() }
         return view
     }
 
     func updateUIView(_ view: InputCaptureView, context: Context) {
         view.inputManager = inputManager
         view.canvasSize = canvasSize
+        view.showKeyboard = showKeyboard
+        view.onPointerMoved = onPointerMoved
     }
 }
 

@@ -31,10 +31,14 @@ public final class ServiceBrowser: ObservableObject {
     public func start() {
         let params = NWParameters()
         let browser = NWBrowser(
-            for: .bonjour(type: "_flux._udp.", domain: "local."),
+            for: .bonjour(type: "_flux._udp", domain: nil),
             using: params
         )
-        browser.browseResultsChangedHandler = { [weak self] results, _ in
+        browser.browseResultsChangedHandler = { [weak self] results, changes in
+            print("[ServiceBrowser] results changed: \(results.count) results, \(changes.count) changes")
+            for result in results {
+                print("[ServiceBrowser]   endpoint: \(result.endpoint), metadata: \(result.metadata)")
+            }
             self?.handleResults(results)
         }
         browser.stateUpdateHandler = { state in
@@ -61,20 +65,21 @@ public final class ServiceBrowser: ObservableObject {
         var found: [FluxHost] = []
         for result in results {
             guard case .service(let name, _, _, _) = result.endpoint else { continue }
-            // TXT record metadata — populated by flux-transport DiscoveryAdvertiser.
+            // TXT record may or may not be present — accept either way.
+            var dict: [String: String] = [:]
             if case .bonjour(let txt) = result.metadata {
-                let dict = txt.dictionary
-                let host = FluxHost(
-                    id: name,
-                    name: name,
-                    pixelPort: UInt16(dict["pixel_port"] ?? "") ?? 9000,
-                    penPort: UInt16(dict["pen_port"] ?? "") ?? 9001,
-                    version: dict["version"] ?? "unknown",
-                    certSHA256: dict["cert_sha256"] ?? "",
-                    endpoint: result.endpoint
-                )
-                found.append(host)
+                dict = txt.dictionary
             }
+            let host = FluxHost(
+                id: name,
+                name: name,
+                pixelPort: UInt16(dict["pixel_port"] ?? "") ?? 9000,
+                penPort: UInt16(dict["pen_port"] ?? "") ?? 9001,
+                version: dict["version"] ?? "unknown",
+                certSHA256: dict["cert_sha256"] ?? "",
+                endpoint: result.endpoint
+            )
+            found.append(host)
         }
         DispatchQueue.main.async {
             self.hosts = found
@@ -84,14 +89,15 @@ public final class ServiceBrowser: ObservableObject {
 
 // NWTXTRecord convenience extension.
 private extension NWTXTRecord {
+    /// Read TXT record entries into a plain dictionary.
+    /// NWTXTRecord supports String subscript natively.
     var dictionary: [String: String] {
         var d: [String: String] = [:]
-        // NWTXTRecord doesn't expose iteration directly in all OS
-        // versions; use the raw DNS-SD key enumeration pattern.
-        // For simplicity we rely on the debug description parsing
-        // or the getEntry API where available.
-        // TODO: use proper NWTXTRecord.getEntry once min deployment
-        // target supports it.
+        for key in ["version", "pixel_port", "pen_port", "cert_sha256"] {
+            if let val = self[key] {
+                d[key] = val
+            }
+        }
         return d
     }
 }

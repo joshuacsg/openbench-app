@@ -159,13 +159,13 @@ public final class HEVCDecoder {
         )
         guard let sampleBuffer = sampleBuffer else { return }
 
-        // Decode synchronously.
+        // Decode synchronously — don't allow async queueing, which can
+        // cause decoded CVPixelBuffers to pile up and blow memory.
         var flagsOut: VTDecodeInfoFlags = []
-        var outputPixelBuffer: CVPixelBuffer?
         let decodeStatus = VTDecompressionSessionDecodeFrame(
             session,
             sampleBuffer: sampleBuffer,
-            flags: [._EnableAsynchronousDecompression],
+            flags: [._1xRealTimePlayback],
             infoFlagsOut: &flagsOut,
             outputHandler: { [weak self] status, _, pixelBuffer, _, _ in
                 guard status == noErr, let pb = pixelBuffer else { return }

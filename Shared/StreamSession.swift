@@ -43,6 +43,7 @@ import Security
 public final class StreamSession: ObservableObject {
     @Published public var state: ConnectionState = .disconnected
     @Published public var stats = StreamStats()
+    @Published public var rttMs: Int? = nil
 
     /// Canvas dimensions reported in the host's Welcome message.
     /// Used by the input capture views to map screen coordinates →
@@ -84,6 +85,17 @@ public final class StreamSession: ObservableObject {
     private let reassembler = FrameReassembler()
     private let decoder = HEVCDecoder()
 
+    // Ping/Pong RTT tracking
+    private var pingTimer: Timer?
+    private var pendingPingNonce: UInt64?
+    private var pendingPingTime: CFAbsoluteTime?
+
+    // Auto-reconnect with exponential backoff
+    private var reconnectTask: Task<Void, Never>?
+    private var reconnectDelay: TimeInterval = 0.5
+    private var lastEndpoint: NWEndpoint?
+    private var lastHostName: String = ""
+
     // Datagram type-byte constants.
     private static let typeVideo:   UInt8 = 0x01
     private static let typeControl: UInt8 = 0x02
@@ -97,126 +109,126 @@ public final class StreamSession: ObservableObject {
     /// Called when the host sends a Pong message in response to a Ping.
     public var onPong: ((UInt64) -> Void)?
 
+    // FPS tracking — count decoded frames per second.
+    private var fpsFrameCount: Int = 0
+    private var fpsTimer: Timer?
+
     public init() {
         decoder.onDecodedFrame = { [weak self] pb, ts in
-            self?.onDecodedFrame?(pb, ts)
+            // Infer canvas size from the first decoded frame so that
+            // InputCaptureView.mapToCanvas() can map touch coordinates
+            // correctly, even when flux-host doesn't send a Welcome message.
             Task { @MainActor [weak self] in
-                self?.stats.framesDecoded += 1
+                guard let self else { return }
+                let w = CVPixelBufferGetWidth(pb)
+                let h = CVPixelBufferGetHeight(pb)
+                let frameSize = CGSize(width: w, height: h)
+                if w > 0 && h > 0 && self.canvasSize != frameSize {
+                    self.canvasSize = frameSize
+                }
+                self.stats.framesDecoded += 1
+                self.fpsFrameCount += 1
+            }
+            self?.onDecodedFrame?(pb, ts)
+        }
+    }
+
+    private func startFpsCounter() {
+        fpsTimer?.invalidate()
+        fpsFrameCount = 0
+        fpsTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.stats.currentFps = Double(self.fpsFrameCount)
+                self.fpsFrameCount = 0
             }
         }
     }
 
-    /// Connect to the host's pixel QUIC endpoint.
+    private func stopFpsCounter() {
+        fpsTimer?.invalidate()
+        fpsTimer = nil
+        stats.currentFps = 0
+    }
+
+    private func startPingLoop() {
+        pingTimer?.invalidate()
+        pingTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, self.state == .connected else { return }
+                let nonce = UInt64.random(in: 0...UInt64.max)
+                self.pendingPingNonce = nonce
+                self.pendingPingTime = CFAbsoluteTimeGetCurrent()
+                self.sendControl(.ping(nonce: nonce))
+            }
+        }
+    }
+
+    private func stopPingLoop() {
+        pingTimer?.invalidate()
+        pingTimer = nil
+        rttMs = nil
+    }
+
+    private func scheduleReconnect() {
+        reconnectTask?.cancel()
+        let delay = reconnectDelay
+        let endpoint = lastEndpoint
+        let hostName = lastHostName
+        reconnectDelay = min(reconnectDelay * 2, 8.0) // cap at 8s
+
+        reconnectTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            guard let self, !Task.isCancelled else { return }
+            guard case .failed = self.state else { return }
+            if let endpoint {
+                self.connect(endpoint: endpoint, hostName: hostName)
+            }
+        }
+    }
+
+    /// Connect to the host's pixel QUIC endpoint by hostname and port.
     public func connect(host: String, port: UInt16) {
+        let endpoint = NWEndpoint.hostPort(
+            host: .init(host),
+            port: .init(integerLiteral: port)
+        )
+        connect(endpoint: endpoint, hostName: host)
+    }
+
+    /// Connect to a Bonjour-discovered endpoint directly. Network.framework
+    /// resolves the NWEndpoint.service address automatically.
+    public func connect(endpoint: NWEndpoint, hostName: String = "") {
         disconnect()
         state = .connecting
+        connectingHost = hostName
+        lastEndpoint = endpoint
+        lastHostName = hostName
+        reconnectDelay = 0.5  // reset backoff
 
-        // Capture the host name so the TLS verify closure can reference it
-        // without capturing `self` (the closure is called on an arbitrary queue).
-        connectingHost = host
-        let capturedHost = host
+        onPong = { [weak self] nonce in
+            guard let self,
+                  nonce == self.pendingPingNonce,
+                  let sent = self.pendingPingTime else { return }
+            let rtt = (CFAbsoluteTimeGetCurrent() - sent) * 1000
+            self.rttMs = Int(rtt.rounded())
+            self.pendingPingNonce = nil
+            self.pendingPingTime = nil
+        }
 
         // Configure QUIC with datagram support.
         let quicOptions = NWProtocolQUIC.Options(alpn: ["flux"])
         quicOptions.isDatagram = true
         quicOptions.maxDatagramFrameSize = 65535
 
-        // IMPORTANT: sec_protocol_options_set_verify_block is SILENTLY
-        // IGNORED for QUIC connections in Network.framework (known Apple
-        // limitation, confirmed on Apple Developer Forums). The verify
-        // block fires for TLS-over-TCP but is skipped for QUIC.
-        //
-        // For development: disable peer authentication entirely so
-        // self-signed certs are accepted without verification.
-        // For production: pin the server cert via the system trust store
-        // or MDM profile.
+        // Disable peer authentication for self-signed certs (dev mode).
         sec_protocol_options_set_peer_authentication_required(
             quicOptions.securityProtocolOptions,
             false
         )
 
-        // Keep the verify block for TOFU cert fingerprint extraction —
-        // it may fire on some OS versions even if not enforced. If it
-        // doesn't fire, we skip the trust prompt (acceptable for dev).
-        sec_protocol_options_set_verify_block(
-            quicOptions.securityProtocolOptions,
-            { [weak self] _, secTrust, completion in
-                // Extract the leaf certificate's SHA-256 fingerprint.
-                guard let certSHA256 = Self.sha256Fingerprint(from: secTrust) else {
-                    // Could not extract cert — reject to be safe.
-                    print("[StreamSession] TLS verify: failed to extract certificate")
-                    completion(false)
-                    return
-                }
-
-                let store = CertificateStore.shared
-                let decision = store.shouldTrust(host: capturedHost, certSHA256: certSHA256)
-
-                switch decision {
-                case .trusted:
-                    // Known-good fingerprint — accept immediately.
-                    completion(true)
-
-                case .firstSeen:
-                    // Unknown cert — accept the connection but raise the trust
-                    // prompt so the user can confirm (TOFU pattern).
-                    // We accept here so Network.framework completes the handshake;
-                    // the UI flag ensures the user is informed before they interact.
-                    completion(true)
-                    Task { @MainActor [weak self] in
-                        guard let self else { return }
-                        let prompt = TrustPrompt(
-                            host: capturedHost,
-                            newSHA: certSHA256,
-                            decision: .firstSeen,
-                            onTrust: {
-                                store.trust(host: capturedHost, certSHA256: certSHA256)
-                            },
-                            onCancel: {
-                                // User rejected after the fact — disconnect.
-                                Task { @MainActor [weak self] in
-                                    self?.disconnect()
-                                }
-                            }
-                        )
-                        self.trustPrompt = prompt
-                    }
-
-                case .changed(let storedSHA):
-                    // Fingerprint mismatch — possible MITM. Reject the connection
-                    // and surface a warning via the trust prompt.
-                    completion(false)
-                    Task { @MainActor [weak self] in
-                        guard let self else { return }
-                        let prompt = TrustPrompt(
-                            host: capturedHost,
-                            newSHA: certSHA256,
-                            decision: .changed(storedSHA: storedSHA),
-                            onTrust: {
-                                // User chose to trust the new cert anyway.
-                                store.trust(host: capturedHost, certSHA256: certSHA256)
-                                // Reconnect now that the store is updated.
-                                Task { @MainActor [weak self] in
-                                    self?.connect(host: capturedHost, port: port)
-                                }
-                            },
-                            onCancel: {
-                                // Stay disconnected — user is aware of the warning.
-                            }
-                        )
-                        self.trustPrompt = prompt
-                    }
-                }
-            },
-            .main
-        )
-
         let params = NWParameters(quic: quicOptions)
 
-        let endpoint = NWEndpoint.hostPort(
-            host: .init(host),
-            port: .init(integerLiteral: port)
-        )
         let conn = NWConnection(to: endpoint, using: params)
         pixelConnection = conn
 
@@ -225,9 +237,14 @@ public final class StreamSession: ObservableObject {
                 switch newState {
                 case .ready:
                     self?.state = .connected
+                    self?.reconnectDelay = 0.5
+                    self?.reconnectTask = nil
+                    self?.startFpsCounter()
+                    self?.startPingLoop()
                     self?.startReceiving()
                 case .failed(let error):
                     self?.state = .failed(error.localizedDescription)
+                    self?.scheduleReconnect()
                 case .cancelled:
                     self?.state = .disconnected
                 default:
@@ -240,6 +257,10 @@ public final class StreamSession: ObservableObject {
     }
 
     public func disconnect() {
+        stopFpsCounter()
+        stopPingLoop()
+        reconnectTask?.cancel()
+        reconnectTask = nil
         pixelConnection?.cancel()
         pixelConnection = nil
         state = .disconnected

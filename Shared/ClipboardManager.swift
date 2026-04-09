@@ -27,14 +27,18 @@ public final class ClipboardManager: ObservableObject {
 
     private var timer: AnyCancellable?
 
-#if canImport(UIKit)
-    private var lastChangeCount: Int = UIPasteboard.general.changeCount
-#elseif canImport(AppKit)
+#if canImport(AppKit)
     private var lastChangeCount: Int = NSPasteboard.general.changeCount
 #endif
 
     public init() {
+        // On macOS, poll NSPasteboard for changes. On iOS, polling
+        // UIPasteboard triggers the system paste-permission dialog on
+        // every read (iOS 16+), so we skip polling entirely. iOS
+        // clipboard sync is handled on-demand via paste shortcut only.
+#if canImport(AppKit)
         startPolling()
+#endif
     }
 
     deinit {
@@ -49,9 +53,6 @@ public final class ClipboardManager: ObservableObject {
         lastSeen = text
 #if canImport(UIKit)
         UIPasteboard.general.string = text
-        // Update our tracked change count so the write itself doesn't fire
-        // the callback on the next tick.
-        lastChangeCount = UIPasteboard.general.changeCount
 #elseif canImport(AppKit)
         let pb = NSPasteboard.general
         pb.clearContents()
@@ -71,21 +72,13 @@ public final class ClipboardManager: ObservableObject {
     }
 
     private func poll() {
-#if canImport(UIKit)
-        let pb = UIPasteboard.general
-        guard pb.changeCount != lastChangeCount else { return }
-        lastChangeCount = pb.changeCount
-        guard let text = pb.string, !text.isEmpty else { return }
-#elseif canImport(AppKit)
+#if canImport(AppKit)
         let pb = NSPasteboard.general
         guard pb.changeCount != lastChangeCount else { return }
         lastChangeCount = pb.changeCount
         guard let text = pb.string(forType: .string), !text.isEmpty else { return }
-#else
-        return
-#endif
-        // Suppress echo of text that just arrived from the host.
         guard text != lastSeen else { return }
         onClipboardChanged?(text)
+#endif
     }
 }
