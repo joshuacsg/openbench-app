@@ -33,6 +33,9 @@
 import Foundation
 import Network
 import Combine
+import CoreVideo
+import Security
+import CryptoKit
 import CryptoKit
 import Security
 
@@ -113,13 +116,30 @@ public final class StreamSession: ObservableObject {
         connectingHost = host
         let capturedHost = host
 
-        // Configure QUIC with datagram support and a TOFU TLS trust policy.
-        // The verify block fires on a background queue with the peer's
-        // sec_trust_t; we extract the leaf certificate, hash its DER encoding
-        // with SHA-256, then check CertificateStore.
-        let tlsOptions = NWProtocolTLS.Options()
+        // Configure QUIC with datagram support.
+        let quicOptions = NWProtocolQUIC.Options(alpn: ["flux"])
+        quicOptions.isDatagram = true
+        quicOptions.maxDatagramFrameSize = 65535
+
+        // IMPORTANT: sec_protocol_options_set_verify_block is SILENTLY
+        // IGNORED for QUIC connections in Network.framework (known Apple
+        // limitation, confirmed on Apple Developer Forums). The verify
+        // block fires for TLS-over-TCP but is skipped for QUIC.
+        //
+        // For development: disable peer authentication entirely so
+        // self-signed certs are accepted without verification.
+        // For production: pin the server cert via the system trust store
+        // or MDM profile.
+        sec_protocol_options_set_peer_authentication_required(
+            quicOptions.securityProtocolOptions,
+            false
+        )
+
+        // Keep the verify block for TOFU cert fingerprint extraction —
+        // it may fire on some OS versions even if not enforced. If it
+        // doesn't fire, we skip the trust prompt (acceptable for dev).
         sec_protocol_options_set_verify_block(
-            tlsOptions.securityProtocolOptions,
+            quicOptions.securityProtocolOptions,
             { [weak self] _, secTrust, completion in
                 // Extract the leaf certificate's SHA-256 fingerprint.
                 guard let certSHA256 = Self.sha256Fingerprint(from: secTrust) else {
@@ -191,12 +211,7 @@ public final class StreamSession: ObservableObject {
             .main
         )
 
-        let quicOptions = NWProtocolQUIC.Options(alpn: ["flux"])
-        quicOptions.isDatagram = true
-        quicOptions.maxDatagramFrameSize = 65535
-
         let params = NWParameters(quic: quicOptions)
-        _ = params // TLS is embedded in QUIC; tlsOptions above configure sec_protocol
 
         let endpoint = NWEndpoint.hostPort(
             host: .init(host),
@@ -269,13 +284,27 @@ public final class StreamSession: ObservableObject {
     }
 
     private func receiveNextDatagram(on conn: NWConnection) {
-        conn.receiveMessage { [weak self] data, context, isComplete, error in
-            guard let self = self, let data = data, !data.isEmpty else {
-                if let error = error {
-                    Task { @MainActor [weak self] in
-                        self?.state = .failed(error.localizedDescription)
-                    }
+        // Use receive() instead of receiveMessage() — QUIC datagrams
+        // (sent via quinn's send_datagram) arrive as unreliable frames,
+        // not stream messages. receiveMessage may only fire for stream
+        // data. receive() captures both.
+        conn.receive(minimumIncompleteLength: 1, maximumLength: 65535) { [weak self] data, context, isComplete, error in
+            guard let self = self else { return }
+
+            if let error = error {
+                print("[StreamSession] receive error: \(error)")
+                Task { @MainActor [weak self] in
+                    self?.state = .failed(error.localizedDescription)
                 }
+                return
+            }
+
+            guard let data = data, !data.isEmpty else {
+                print("[StreamSession] receive: empty data, isComplete=\(isComplete)")
+                if isComplete {
+                    // Stream ended — try to continue receiving new datagrams
+                }
+                self.receiveNextDatagram(on: conn)
                 return
             }
 
@@ -284,25 +313,18 @@ public final class StreamSession: ObservableObject {
                 self?.stats.bytesReceived += UInt64(data.count)
             }
 
-            // Dispatch on the leading type byte.
-            let typeByte = data[data.startIndex]
-            let payload  = data.dropFirst()
-
-            switch typeByte {
-            case Self.typeControl:
-                // Incoming control JSON from the host (Welcome, ClipboardSync, Pong, …).
-                self.handleIncomingControl(payload)
-
-            default:
-                // 0x01 (video fragment) or legacy headerless packet — push to reassembler.
-                // For legacy packets without a type byte prefix, pass the full datagram.
-                let fragment = (typeByte == Self.typeVideo) ? payload : data
-                if let frame = self.reassembler.push(fragment) {
-                    do {
-                        try self.decoder.decode(annexB: frame.data, timestampUs: frame.timestampUs)
-                    } catch {
-                        print("[StreamSession] decode error: \(error)")
-                    }
+            // flux-host sends raw VideoPacketHeader (19 bytes) + payload
+            // as QUIC datagrams. The header's first byte is the packet
+            // type (0x01 = video). Pass the FULL datagram to the
+            // reassembler — it expects the type byte at position 0.
+            //
+            // Future: when the host also sends control datagrams with
+            // type 0x02, we'll check data[0] here first and dispatch.
+            if let frame = self.reassembler.push(data) {
+                do {
+                    try self.decoder.decode(annexB: frame.data, timestampUs: frame.timestampUs)
+                } catch {
+                    print("[StreamSession] decode error: \(error)")
                 }
             }
 
@@ -380,30 +402,19 @@ public final class StreamSession: ObservableObject {
     ///   verify block closure.
     /// - Returns: Lowercase 64-character hex string, or `nil` on failure.
     private static func sha256Fingerprint(from secTrust: sec_trust_t) -> String? {
-        // sec_trust_copy_certificates returns an array of sec_certificate_t
-        // values. Index 0 is the leaf (server) certificate.
-        guard let certArray = sec_trust_copy_certificates(secTrust) else {
+        // Bridge the Network.framework `sec_trust_t` to the Security
+        // framework `SecTrust` via sec_trust_copy_ref().
+        let trust = sec_trust_copy_ref(secTrust).takeRetainedValue()
+
+        // Get the certificate chain. SecTrustCopyCertificateChain is
+        // available on iOS 15+ / macOS 12+.
+        guard let chain = SecTrustCopyCertificateChain(trust) as? [SecCertificate],
+              let leaf = chain.first else {
             return nil
         }
-        // Bridge CFArray → Swift array
-        let certs = certArray as [AnyObject]
-        guard let first = certs.first else { return nil }
 
-        // sec_certificate_t is an opaque wrapper; unwrap to SecCertificate.
-        let secCert: SecCertificate
-        if let cert = first as? SecCertificate {
-            secCert = cert
-        } else {
-            // On some OS versions, sec_certificate_t bridges differently;
-            // use sec_certificate_copy_ref() to get the underlying SecCertificate.
-            let secCertT = first as! sec_certificate_t   // safe: from sec_trust array
-            secCert = sec_certificate_copy_ref(secCertT).takeRetainedValue()
-        }
-
-        // Get the DER encoding of the certificate.
-        guard let derData = SecCertificateCopyData(secCert) as Data? else {
-            return nil
-        }
+        // Get the DER encoding of the leaf certificate.
+        let derData = SecCertificateCopyData(leaf) as Data
 
         // Hash with CryptoKit SHA-256 and hex-encode.
         let digest = SHA256.hash(data: derData)

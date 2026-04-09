@@ -30,30 +30,90 @@ struct HostPickerView: View {
     @ObservedObject var browser: ServiceBrowser
     var onSelect: (FluxHost) -> Void
 
+    @State private var showManualConnect = false
+    @State private var manualHost = ""
+    @State private var manualPixelPort = "9000"
+    @State private var manualPenPort = "9001"
+
     var body: some View {
         NavigationStack {
-            List(browser.hosts) { host in
-                Button {
-                    onSelect(host)
-                } label: {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(host.name)
-                            .font(.headline)
-                        Text("pixel:\(host.pixelPort) pen:\(host.penPort) v\(host.version)")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+            List {
+                // Discovered hosts via Bonjour
+                if !browser.hosts.isEmpty {
+                    Section("Discovered") {
+                        ForEach(browser.hosts) { host in
+                            Button {
+                                onSelect(host)
+                            } label: {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(host.name)
+                                        .font(.headline)
+                                    Text("pixel:\(host.pixelPort) pen:\(host.penPort) v\(host.version)")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                .padding(.vertical, 4)
+                            }
+                        }
                     }
-                    .padding(.vertical, 4)
+                }
+
+                // Manual connect section
+                Section("Connect by IP") {
+                    TextField("Host (IP or hostname)", text: $manualHost)
+                        #if os(iOS)
+                        .keyboardType(.URL)
+                        .autocapitalization(.none)
+                        #endif
+                        .textFieldStyle(.roundedBorder)
+                    HStack {
+                        TextField("Pixel port", text: $manualPixelPort)
+                            #if os(iOS)
+                            .keyboardType(.numberPad)
+                            #endif
+                            .textFieldStyle(.roundedBorder)
+                        TextField("Pen port", text: $manualPenPort)
+                            #if os(iOS)
+                            .keyboardType(.numberPad)
+                            #endif
+                            .textFieldStyle(.roundedBorder)
+                    }
+                    Button("Connect") {
+                        guard !manualHost.isEmpty,
+                              let pp = UInt16(manualPixelPort),
+                              let penP = UInt16(manualPenPort) else { return }
+                        let host = FluxHost(
+                            id: manualHost,
+                            name: manualHost,
+                            pixelPort: pp,
+                            penPort: penP,
+                            version: "manual",
+                            certSHA256: "",
+                            endpoint: .hostPort(host: .init(manualHost), port: .init(integerLiteral: pp))
+                        )
+                        onSelect(host)
+                    }
+                    .disabled(manualHost.isEmpty)
                 }
             }
             .navigationTitle("OpenBench")
+            .toolbar {
+                ToolbarItem(placement: .automatic) {
+                    Button {
+                        browser.stop()
+                        browser.start()
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                    .help("Refresh host list")
+                }
+            }
             .overlay {
                 if browser.hosts.isEmpty {
-                    ContentUnavailableView(
-                        "Looking for hosts…",
-                        systemImage: "network",
-                        description: Text("Make sure a flux host is running with --advertise on the same network.")
-                    )
+                    // Only show the empty state if the manual section
+                    // is scrolled out of view (i.e. the list is truly
+                    // empty). Since we always have the manual section,
+                    // don't show the overlay.
                 }
             }
         }

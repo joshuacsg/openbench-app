@@ -3,36 +3,61 @@
 	archiveVersion = 1;
 	classes = {
 	};
-	objectVersion = 77;
+	objectVersion = 63;
 	objects = {
 
 /* Begin PBXBuildFile section */
 		25A8CBB8832DDC915960202A /* OpenBenchApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = C53E8A1FE81DC4BBAE0FF33E /* OpenBenchApp.swift */; };
 		41776C115DA30269166664E5 /* VideoDecoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 830648C7ACFC659CA3F4F211 /* VideoDecoder.swift */; };
 		477A7AA6A7B41FA63B77357A /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC56151BD60A6B0F7ADD6123 /* ContentView.swift */; };
+		4C7F0245CA2BDD1889F9A4B9 /* CertificateStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7CD29C8AEB81EB5B255C1E8 /* CertificateStore.swift */; };
+		62DE77735D10DDD0BD88E370 /* MetalRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8ECADB94DBB4A4E4AD20B3B7 /* MetalRenderer.swift */; };
 		646A642B6B45E19F645200C3 /* HostDaemon.swift in Sources */ = {isa = PBXBuildFile; fileRef = ADD46029B23DE6A843B06C6B /* HostDaemon.swift */; };
+		669B4423375B0F8EC73F8688 /* StreamSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = C8BBF4075A1A8811FECA7B1D /* StreamSession.swift */; };
+		679B2070A099C6E95CBBE8CA /* ClipboardManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 687A31978A8D4481B0903205 /* ClipboardManager.swift */; };
 		7557E04AE44E918B34EF042E /* ServiceBrowser.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8220676B76EE72C55D2E1C95 /* ServiceBrowser.swift */; };
 		92DE1A64E34A19DFA9302EF4 /* HostApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = F6044530E8E492165DD706E7 /* HostApp.swift */; };
 		9B190063017EC21972EB001E /* VideoDecoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 830648C7ACFC659CA3F4F211 /* VideoDecoder.swift */; };
+		9F89DFBBF276B794F56E5471 /* DisplayPickerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D47C4DE40AA3DDD80951AF6 /* DisplayPickerView.swift */; };
 		A30A19E163648C974F655BDF /* FrameReassembler.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CD10BE1524D03AAD391DB8A /* FrameReassembler.swift */; };
 		A36FB7CDEDAEE60A54AAC3B8 /* OpenBenchViewerApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 53123F7055D6586949D8688E /* OpenBenchViewerApp.swift */; };
+		A73096CD93F8C4CEB46027CC /* TrustPromptView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2812EE95D69353BD67BC641D /* TrustPromptView.swift */; };
+		AAAF5AB6A4DE4D620E25904E /* DisplayPickerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D47C4DE40AA3DDD80951AF6 /* DisplayPickerView.swift */; };
+		B31C099F2091233BE0C0D1EE /* StreamSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = C8BBF4075A1A8811FECA7B1D /* StreamSession.swift */; };
+		B6214C386D008498A5D980ED /* ClipboardManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 687A31978A8D4481B0903205 /* ClipboardManager.swift */; };
 		B73EF428259E897C1DDFA720 /* ServiceBrowser.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8220676B76EE72C55D2E1C95 /* ServiceBrowser.swift */; };
+		B747E2E7EF3CF5A33C2E6714 /* TrustPromptView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2812EE95D69353BD67BC641D /* TrustPromptView.swift */; };
 		BB3EAC162BB9208F2C0DC309 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC56151BD60A6B0F7ADD6123 /* ContentView.swift */; };
+		C2BCBC2D3245D9065468F117 /* CertificateStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7CD29C8AEB81EB5B255C1E8 /* CertificateStore.swift */; };
+		C3CAB78112ED1B30D10BBF8C /* KeyboardInputManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 53CD11B6CF500F0B97678E11 /* KeyboardInputManager.swift */; };
 		C8D69927138C8F9F72F47EB1 /* FrameReassembler.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CD10BE1524D03AAD391DB8A /* FrameReassembler.swift */; };
+		CAFB66513B9D46275202BCD2 /* InputManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2DA11CBF8E60521D33F60677 /* InputManager.swift */; };
+		D689EC82E045F057F5F48174 /* InputManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2DA11CBF8E60521D33F60677 /* InputManager.swift */; };
+		E06B48453E9C7F4DD7B048FB /* MetalRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8ECADB94DBB4A4E4AD20B3B7 /* MetalRenderer.swift */; };
+		FFA8E943BB04AA5A8D874E1E /* TouchInputManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE2E2F081BA30D040D08F35A /* TouchInputManager.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 		04DA354EE6A15711CB2FB9F3 /* OpenBench.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = OpenBench.entitlements; sourceTree = "<group>"; };
+		0D47C4DE40AA3DDD80951AF6 /* DisplayPickerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DisplayPickerView.swift; sourceTree = "<group>"; };
+		2812EE95D69353BD67BC641D /* TrustPromptView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrustPromptView.swift; sourceTree = "<group>"; };
 		2CD10BE1524D03AAD391DB8A /* FrameReassembler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FrameReassembler.swift; sourceTree = "<group>"; };
+		2DA11CBF8E60521D33F60677 /* InputManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InputManager.swift; sourceTree = "<group>"; };
 		53123F7055D6586949D8688E /* OpenBenchViewerApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenBenchViewerApp.swift; sourceTree = "<group>"; };
-		54BA1F52076A02BC86816164 /* OpenBench.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = OpenBench.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		53CD11B6CF500F0B97678E11 /* KeyboardInputManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardInputManager.swift; sourceTree = "<group>"; };
+		54BA1F52076A02BC86816164 /* OpenBench.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = OpenBench.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		643349DB26D6725A4FC423FB /* OpenBenchHost.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = OpenBenchHost.entitlements; sourceTree = "<group>"; };
+		687A31978A8D4481B0903205 /* ClipboardManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipboardManager.swift; sourceTree = "<group>"; };
 		68CED142BC111898E56D82B4 /* OpenBench Host.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "OpenBench Host.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		8220676B76EE72C55D2E1C95 /* ServiceBrowser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServiceBrowser.swift; sourceTree = "<group>"; };
 		830648C7ACFC659CA3F4F211 /* VideoDecoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoDecoder.swift; sourceTree = "<group>"; };
+		8ECADB94DBB4A4E4AD20B3B7 /* MetalRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetalRenderer.swift; sourceTree = "<group>"; };
 		92405635335323BFE0895520 /* OpenBench Viewer.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "OpenBench Viewer.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		ADD46029B23DE6A843B06C6B /* HostDaemon.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostDaemon.swift; sourceTree = "<group>"; };
 		C53E8A1FE81DC4BBAE0FF33E /* OpenBenchApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenBenchApp.swift; sourceTree = "<group>"; };
+		C8BBF4075A1A8811FECA7B1D /* StreamSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StreamSession.swift; sourceTree = "<group>"; };
+		D7CD29C8AEB81EB5B255C1E8 /* CertificateStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CertificateStore.swift; sourceTree = "<group>"; };
+		EE2E2F081BA30D040D08F35A /* TouchInputManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TouchInputManager.swift; sourceTree = "<group>"; };
 		F6044530E8E492165DD706E7 /* HostApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostApp.swift; sourceTree = "<group>"; };
 		FC56151BD60A6B0F7ADD6123 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		FCF49E59533099BD9D52B73E /* OpenBenchViewer.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = OpenBenchViewer.entitlements; sourceTree = "<group>"; };
@@ -42,6 +67,7 @@
 		0523B13251E3D43A3ED63B28 /* macOS */ = {
 			isa = PBXGroup;
 			children = (
+				53CD11B6CF500F0B97678E11 /* KeyboardInputManager.swift */,
 				FCF49E59533099BD9D52B73E /* OpenBenchViewer.entitlements */,
 				53123F7055D6586949D8688E /* OpenBenchViewerApp.swift */,
 			);
@@ -53,6 +79,7 @@
 			children = (
 				04DA354EE6A15711CB2FB9F3 /* OpenBench.entitlements */,
 				C53E8A1FE81DC4BBAE0FF33E /* OpenBenchApp.swift */,
+				EE2E2F081BA30D040D08F35A /* TouchInputManager.swift */,
 			);
 			path = iOS;
 			sourceTree = "<group>";
@@ -71,6 +98,8 @@
 			isa = PBXGroup;
 			children = (
 				FC56151BD60A6B0F7ADD6123 /* ContentView.swift */,
+				0D47C4DE40AA3DDD80951AF6 /* DisplayPickerView.swift */,
+				2812EE95D69353BD67BC641D /* TrustPromptView.swift */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -99,8 +128,13 @@
 		F531CE972ADF4E9DC6AF2A50 /* Shared */ = {
 			isa = PBXGroup;
 			children = (
+				D7CD29C8AEB81EB5B255C1E8 /* CertificateStore.swift */,
+				687A31978A8D4481B0903205 /* ClipboardManager.swift */,
 				2CD10BE1524D03AAD391DB8A /* FrameReassembler.swift */,
+				2DA11CBF8E60521D33F60677 /* InputManager.swift */,
+				8ECADB94DBB4A4E4AD20B3B7 /* MetalRenderer.swift */,
 				8220676B76EE72C55D2E1C95 /* ServiceBrowser.swift */,
+				C8BBF4075A1A8811FECA7B1D /* StreamSession.swift */,
 				830648C7ACFC659CA3F4F211 /* VideoDecoder.swift */,
 				35409DEB19C4CE01406E4BCD /* Views */,
 			);
@@ -191,7 +225,6 @@
 			);
 			mainGroup = 815A93A780771795184A73F3;
 			minimizedProjectReferenceProxies = 1;
-			preferredProjectObjectVersion = 77;
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
@@ -207,10 +240,18 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				C2BCBC2D3245D9065468F117 /* CertificateStore.swift in Sources */,
+				B6214C386D008498A5D980ED /* ClipboardManager.swift in Sources */,
 				477A7AA6A7B41FA63B77357A /* ContentView.swift in Sources */,
+				9F89DFBBF276B794F56E5471 /* DisplayPickerView.swift in Sources */,
 				A30A19E163648C974F655BDF /* FrameReassembler.swift in Sources */,
+				D689EC82E045F057F5F48174 /* InputManager.swift in Sources */,
+				62DE77735D10DDD0BD88E370 /* MetalRenderer.swift in Sources */,
 				25A8CBB8832DDC915960202A /* OpenBenchApp.swift in Sources */,
 				B73EF428259E897C1DDFA720 /* ServiceBrowser.swift in Sources */,
+				B31C099F2091233BE0C0D1EE /* StreamSession.swift in Sources */,
+				FFA8E943BB04AA5A8D874E1E /* TouchInputManager.swift in Sources */,
+				A73096CD93F8C4CEB46027CC /* TrustPromptView.swift in Sources */,
 				9B190063017EC21972EB001E /* VideoDecoder.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -228,10 +269,18 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				4C7F0245CA2BDD1889F9A4B9 /* CertificateStore.swift in Sources */,
+				679B2070A099C6E95CBBE8CA /* ClipboardManager.swift in Sources */,
 				BB3EAC162BB9208F2C0DC309 /* ContentView.swift in Sources */,
+				AAAF5AB6A4DE4D620E25904E /* DisplayPickerView.swift in Sources */,
 				C8D69927138C8F9F72F47EB1 /* FrameReassembler.swift in Sources */,
+				CAFB66513B9D46275202BCD2 /* InputManager.swift in Sources */,
+				C3CAB78112ED1B30D10BBF8C /* KeyboardInputManager.swift in Sources */,
+				E06B48453E9C7F4DD7B048FB /* MetalRenderer.swift in Sources */,
 				A36FB7CDEDAEE60A54AAC3B8 /* OpenBenchViewerApp.swift in Sources */,
 				7557E04AE44E918B34EF042E /* ServiceBrowser.swift in Sources */,
+				669B4423375B0F8EC73F8688 /* StreamSession.swift in Sources */,
+				B747E2E7EF3CF5A33C2E6714 /* TrustPromptView.swift in Sources */,
 				41776C115DA30269166664E5 /* VideoDecoder.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -245,11 +294,19 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 6T4Q524WV2;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = OpenBench;
+				INFOPLIST_KEY_NSBonjourServices = _flux._udp.;
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "OpenBench needs local network access to discover and connect to flux hosts.";
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight UIInterfaceOrientationPortrait";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
+				MARKETING_VERSION = 1.0.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.openbench.viewer;
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -262,11 +319,19 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 6T4Q524WV2;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = OpenBench;
+				INFOPLIST_KEY_NSBonjourServices = _flux._udp.;
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "OpenBench needs local network access to discover and connect to flux hosts.";
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight UIInterfaceOrientationPortrait";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
+				MARKETING_VERSION = 1.0.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.openbench.viewer;
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -335,11 +400,16 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = "OpenBench Host";
 				INFOPLIST_KEY_LSUIElement = YES;
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "OpenBench Host needs local network access to advertise and serve connections.";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
+				MARKETING_VERSION = 1.0.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.openbench.host;
 				SDKROOT = macosx;
 			};
@@ -414,10 +484,16 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = "OpenBench Viewer";
+				INFOPLIST_KEY_NSBonjourServices = _flux._udp.;
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "OpenBench needs local network access to discover and connect to flux hosts.";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
+				MARKETING_VERSION = 1.0.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.openbench.viewer.mac;
 				SDKROOT = macosx;
 			};
@@ -429,11 +505,16 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = "OpenBench Host";
 				INFOPLIST_KEY_LSUIElement = YES;
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "OpenBench Host needs local network access to advertise and serve connections.";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
+				MARKETING_VERSION = 1.0.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.openbench.host;
 				SDKROOT = macosx;
 			};
@@ -445,10 +526,16 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = "OpenBench Viewer";
+				INFOPLIST_KEY_NSBonjourServices = _flux._udp.;
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "OpenBench needs local network access to discover and connect to flux hosts.";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
+				MARKETING_VERSION = 1.0.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.openbench.viewer.mac;
 				SDKROOT = macosx;
 			};

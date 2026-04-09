@@ -60,7 +60,7 @@ public final class MetalRenderer {
         let layer = CAMetalLayer()
         layer.device = device
         layer.pixelFormat = .bgra8Unorm
-        layer.framebufferOnly = true
+        layer.framebufferOnly = false  // must be false for blit encoder copy
         layer.maximumDrawableCount = 2 // Third drawable = +1 frame latency
         layer.contentsGravity = .resizeAspect
         #if os(macOS)

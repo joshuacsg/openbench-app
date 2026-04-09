@@ -12,9 +12,19 @@ targets:
     sources:
       - Shared
       - iOS
+    info:
+      path: iOS/Info.plist
+      properties:
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+          - UIInterfaceOrientationPortrait
+        CFBundleDisplayName: OpenBench
     settings:
       PRODUCT_BUNDLE_IDENTIFIER: com.openbench.viewer
-      INFOPLIST_KEY_UILaunchScreen_Generation: true
+      MARKETING_VERSION: "1.0.0"
+      CURRENT_PROJECT_VERSION: "1"
       CODE_SIGN_STYLE: Automatic
 
   OpenBench Viewer:
@@ -23,8 +33,14 @@ targets:
     sources:
       - Shared
       - macOS
+    info:
+      path: macOS/Info.plist
+      properties:
+        CFBundleDisplayName: "OpenBench Viewer"
     settings:
       PRODUCT_BUNDLE_IDENTIFIER: com.openbench.viewer.mac
+      MARKETING_VERSION: "1.0.0"
+      CURRENT_PROJECT_VERSION: "1"
       CODE_SIGN_STYLE: Automatic
 
   OpenBench Host:
@@ -34,5 +50,10 @@ targets:
       - Host
     settings:
       PRODUCT_BUNDLE_IDENTIFIER: com.openbench.host
+      GENERATE_INFOPLIST_FILE: YES
+      MARKETING_VERSION: "1.0.0"
+      CURRENT_PROJECT_VERSION: "1"
+      INFOPLIST_KEY_CFBundleDisplayName: "OpenBench Host"
       INFOPLIST_KEY_LSUIElement: true
+      INFOPLIST_KEY_NSLocalNetworkUsageDescription: "OpenBench Host needs local network access to advertise and serve connections."
       CODE_SIGN_STYLE: Automatic
