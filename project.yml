@@ -1,0 +1,38 @@
+name: OpenBench
+options:
+  bundleIdPrefix: com.openbench
+  deploymentTarget:
+    iOS: "17.0"
+    macOS: "14.0"
+
+targets:
+  OpenBench:
+    type: application
+    platform: iOS
+    sources:
+      - Shared
+      - iOS
+    settings:
+      PRODUCT_BUNDLE_IDENTIFIER: com.openbench.viewer
+      INFOPLIST_KEY_UILaunchScreen_Generation: true
+      CODE_SIGN_STYLE: Automatic
+
+  OpenBench Viewer:
+    type: application
+    platform: macOS
+    sources:
+      - Shared
+      - macOS
+    settings:
+      PRODUCT_BUNDLE_IDENTIFIER: com.openbench.viewer.mac
+      CODE_SIGN_STYLE: Automatic
+
+  OpenBench Host:
+    type: application
+    platform: macOS
+    sources:
+      - Host
+    settings:
+      PRODUCT_BUNDLE_IDENTIFIER: com.openbench.host
+      INFOPLIST_KEY_LSUIElement: true
+      CODE_SIGN_STYLE: Automatic
