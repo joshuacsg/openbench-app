@@ -61,11 +61,16 @@ struct HostPickerView: View {
 }
 
 /// Video stream view — connects to the host, decodes HEVC, renders
-/// decoded frames via Metal.
+/// decoded frames via Metal, and captures input.
 struct StreamView: View {
     let host: FluxHost
     @StateObject private var session = StreamSession()
+    @StateObject private var inputManager = InputManager()
+    @StateObject private var clipboardManager = ClipboardManager()
     @Environment(\.dismiss) private var dismiss
+
+    /// Currently selected display ID (nil = Unified / host decides).
+    @State private var selectedDisplayID: UInt32? = nil
 
     var body: some View {
         ZStack {
@@ -74,10 +79,37 @@ struct StreamView: View {
             MetalVideoView(session: session)
                 .ignoresSafeArea()
 
+            // Input capture overlay — transparent, sits above the video
+            // layer so it receives all touch / keyboard events.
+#if canImport(UIKit)
+            InputCaptureViewRepresentable(
+                inputManager: inputManager,
+                canvasSize: session.canvasSize
+            )
+            .ignoresSafeArea()
+#elseif canImport(AppKit)
+            MacInputCaptureViewRepresentable(
+                inputManager: inputManager,
+                canvasSize: session.canvasSize
+            )
+            .ignoresSafeArea()
+#endif
+
             // Status overlay
             VStack {
                 HStack {
                     statusPill
+
+                    // Display picker — only visible once the host reports displays.
+                    if !session.availableDisplays.isEmpty {
+                        DisplayPickerView(
+                            displays: session.availableDisplays,
+                            selectedDisplayID: $selectedDisplayID
+                        ) { displayID in
+                            inputManager.setActiveDisplay(displayID)
+                        }
+                    }
+
                     Spacer()
                     Button {
                         session.disconnect()
@@ -96,9 +128,33 @@ struct StreamView: View {
         }
         .onAppear {
             session.connect(host: host.name, port: host.pixelPort)
+
+            // Wire the InputManager's send callback to the session.
+            inputManager.sendControl = { [weak session] message in
+                session?.sendControl(message)
+            }
+
+            // Local clipboard changes → send to host.
+            clipboardManager.onClipboardChanged = { [weak inputManager] text in
+                inputManager?.syncClipboard(text)
+            }
+
+            // Incoming ClipboardSync from host → write to local clipboard.
+            session.onClipboardSync = { [weak clipboardManager] text in
+                clipboardManager?.write(text)
+            }
         }
         .onDisappear {
+            inputManager.sendControl = nil
+            clipboardManager.onClipboardChanged = nil
+            session.onClipboardSync = nil
             session.disconnect()
+        }
+        // Show TrustPromptView whenever the TLS verify block produces a new
+        // or changed certificate that requires user attention.
+        .sheet(item: $session.trustPrompt) { prompt in
+            TrustPromptView(prompt: prompt)
+                .presentationDetents([.medium])
         }
     }
 
@@ -136,6 +192,30 @@ struct StreamView: View {
 
 #if canImport(UIKit)
 import UIKit
+
+// MARK: - iOS input capture representable
+
+/// UIViewRepresentable that wraps InputCaptureView and connects it to
+/// the shared InputManager. Lays transparently on top of MetalVideoView.
+struct InputCaptureViewRepresentable: UIViewRepresentable {
+    let inputManager: InputManager
+    let canvasSize: CGSize
+
+    func makeUIView(context: Context) -> InputCaptureView {
+        let view = InputCaptureView()
+        view.inputManager = inputManager
+        view.canvasSize = canvasSize
+        view.backgroundColor = .clear
+        // Become first responder so hardware keyboard events are received.
+        DispatchQueue.main.async { view.becomeFirstResponder() }
+        return view
+    }
+
+    func updateUIView(_ view: InputCaptureView, context: Context) {
+        view.inputManager = inputManager
+        view.canvasSize = canvasSize
+    }
+}
 
 /// UIViewRepresentable that hosts the MetalRenderer's CAMetalLayer.
 struct MetalVideoView: UIViewRepresentable {
@@ -178,6 +258,29 @@ struct MetalVideoView: UIViewRepresentable {
 }
 #elseif canImport(AppKit)
 import AppKit
+
+// MARK: - macOS input capture representable
+
+/// NSViewRepresentable that wraps MacInputCaptureView and connects it to
+/// the shared InputManager. Lays transparently on top of MetalVideoView.
+struct MacInputCaptureViewRepresentable: NSViewRepresentable {
+    let inputManager: InputManager
+    let canvasSize: CGSize
+
+    func makeNSView(context: Context) -> MacInputCaptureView {
+        let view = MacInputCaptureView()
+        view.inputManager = inputManager
+        view.canvasSize = canvasSize
+        // Become first responder so keyboard events are routed here.
+        DispatchQueue.main.async { view.window?.makeFirstResponder(view) }
+        return view
+    }
+
+    func updateNSView(_ view: MacInputCaptureView, context: Context) {
+        view.inputManager = inputManager
+        view.canvasSize = canvasSize
+    }
+}
 
 /// NSViewRepresentable that hosts the MetalRenderer's CAMetalLayer.
 struct MetalVideoView: NSViewRepresentable {
