@@ -229,6 +229,10 @@ struct StreamView: View {
     /// Soft keyboard visibility toggle (iOS only).
     @State private var showKeyboard = false
 
+    /// Input mode: false = touchscreen (finger is the cursor),
+    /// true = trackpad (relative cursor, tap-to-click). Persisted.
+    @AppStorage("input.trackpadMode") private var trackpadMode = false
+
     /// Paste modal visibility.
     @State private var showPasteModal = false
 
@@ -272,6 +276,7 @@ struct StreamView: View {
                     inputManager: inputManager,
                     canvasSize: session.canvasSize,
                     showKeyboard: showKeyboard,
+                    trackpadMode: trackpadMode,
                     viewportScale: viewportScale,
                     viewportOffset: viewportOffset,
                     onPointerMoved: { pt in cursorPosition = pt },
@@ -304,8 +309,6 @@ struct StreamView: View {
         // so they receive touches above the UIView input capture.
         .overlay(alignment: .top) {
             HStack(spacing: 8) {
-                statusPill
-
                 if !session.availableDisplays.isEmpty {
                     Button {
                         withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
@@ -333,6 +336,8 @@ struct StreamView: View {
                         maxDimension: maxDimension
                     ))
                 }
+
+                statusPill
 
                 Spacer()
 
@@ -372,6 +377,15 @@ struct StreamView: View {
                         .foregroundStyle(.white.opacity(0.85))
                 }
                 .buttonStyle(GlassButtonStyle())
+
+                Button {
+                    trackpadMode.toggle()
+                } label: {
+                    Image(systemName: trackpadMode ? "cursorarrow.motionlines" : "hand.tap")
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.85))
+                }
+                .buttonStyle(GlassButtonStyle(isActive: trackpadMode))
 
                 Button {
                     showKeyboard.toggle()
@@ -693,6 +707,7 @@ struct StreamView: View {
                 .shadow(color: statusColor.opacity(0.6), radius: 4)
             Text(statusText)
                 .font(.system(.caption, design: .rounded, weight: .medium))
+                .monospacedDigit()
                 .foregroundStyle(.white.opacity(0.9))
         }
         .padding(.horizontal, 12)
@@ -776,6 +791,7 @@ struct InputCaptureViewRepresentable: UIViewRepresentable {
     let inputManager: InputManager
     let canvasSize: CGSize
     var showKeyboard: Bool = false
+    var trackpadMode: Bool = false
     var viewportScale: CGFloat = 1.0
     var viewportOffset: CGPoint = .zero
     var onPointerMoved: ((CGPoint?) -> Void)?
@@ -786,6 +802,7 @@ struct InputCaptureViewRepresentable: UIViewRepresentable {
         view.inputManager = inputManager
         view.canvasSize = canvasSize
         view.showKeyboard = showKeyboard
+        view.trackpadMode = trackpadMode
         view.onPointerMoved = onPointerMoved
         view.onViewportChanged = onViewportChanged
         view.backgroundColor = .clear
@@ -796,6 +813,7 @@ struct InputCaptureViewRepresentable: UIViewRepresentable {
         view.inputManager = inputManager
         view.canvasSize = canvasSize
         view.showKeyboard = showKeyboard
+        view.trackpadMode = trackpadMode
         view.onPointerMoved = onPointerMoved
         view.onViewportChanged = onViewportChanged
         // Sync viewport from minimap slider → InputCaptureView.

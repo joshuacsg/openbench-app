@@ -83,6 +83,27 @@ public final class InputCaptureView: UIView, UIKeyInput, UIPointerInteractionDel
         }
     }
 
+    /// Input mode. `false` = touchscreen (the finger IS the cursor —
+    /// absolute positioning). `true` = trackpad: the whole surface
+    /// drives a relative cursor like a laptop trackpad — move, tap to
+    /// click, tap-and-a-half to drag, two-finger scroll, two-finger
+    /// right-click. The tracked cursor is authoritative; the host
+    /// receives absolute moves to it so the two never drift.
+    public var trackpadMode: Bool = false {
+        didSet {
+            guard trackpadMode != oldValue else { return }
+            if trackpadMode {
+                if !trackpadCursorInitialized {
+                    trackpadCursor = CGPoint(x: bounds.midX, y: bounds.midY)
+                    trackpadCursorInitialized = true
+                }
+                onPointerMoved?(trackpadCursor)
+            } else {
+                onPointerMoved?(nil)
+            }
+        }
+    }
+
     // MARK: - Setup
 
     public override init(frame: CGRect) {
@@ -127,6 +148,21 @@ public final class InputCaptureView: UIView, UIKeyInput, UIPointerInteractionDel
     private var touchDownViewPoint: CGPoint?
     private var dragStarted = false
 
+    // Trackpad mode state. The cursor lives where we last left it (not
+    // under the finger); finger deltas move it, and we send the host an
+    // absolute move to the tracked position.
+    private var trackpadCursor: CGPoint = .zero
+    private var trackpadCursorInitialized = false
+    private var trackpadLastPoint: CGPoint?
+    private var trackpadGestureOrigin: CGPoint?
+    private var trackpadTouchMoved = false
+    private var trackpadDragging = false
+    private var dragLockArmed = false
+    private var lastTapEndTime: TimeInterval = 0
+    private static let trackpadSensitivity: CGFloat = 1.6
+    private static let trackpadTapSlop: CGFloat = 6
+    private static let tapAndAHalfWindow: TimeInterval = 0.35
+
     // MARK: - Touch → Mouse
 
     public override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
@@ -148,6 +184,12 @@ public final class InputCaptureView: UIView, UIKeyInput, UIPointerInteractionDel
             }
             directScrollLastMidpoint = midpoint(of: directTouches)
             onPointerMoved?(nil)
+            return
+        }
+
+        // Trackpad mode: relative cursor, click decided on touch-up.
+        if trackpadMode, touch.type == .direct {
+            trackpadTouchBegan(touch)
             return
         }
 
@@ -188,6 +230,11 @@ public final class InputCaptureView: UIView, UIKeyInput, UIPointerInteractionDel
             return
         }
 
+        if trackpadMode, touch.type == .direct {
+            trackpadTouchMovedHandler(touch)
+            return
+        }
+
         let viewPt = touch.location(in: self)
         if !dragStarted {
             guard let start = touchDownViewPoint,
@@ -221,6 +268,10 @@ public final class InputCaptureView: UIView, UIKeyInput, UIPointerInteractionDel
             return
         }
 
+        if trackpadMode, touch.type == .direct {
+            trackpadTouchEnded(touch)
+            return
+        }
 
         if dragStarted {
             let viewPt = touch.location(in: self)
@@ -238,6 +289,69 @@ public final class InputCaptureView: UIView, UIKeyInput, UIPointerInteractionDel
         pointerButtonDown = false
         directScrollActive = false
         directScrollLastMidpoint = nil
+    }
+
+    // MARK: - Trackpad mode (relative cursor)
+
+    private func trackpadTouchBegan(_ touch: UITouch) {
+        if !trackpadCursorInitialized {
+            trackpadCursor = CGPoint(x: bounds.midX, y: bounds.midY)
+            trackpadCursorInitialized = true
+        }
+        let pt = touch.location(in: self)
+        trackpadLastPoint = pt
+        trackpadGestureOrigin = pt
+        trackpadTouchMoved = false
+        // Tap-and-a-half: a touch starting just after a tap becomes a
+        // drag (button held while moving), like a Mac trackpad.
+        dragLockArmed = (touch.timestamp - lastTapEndTime) < Self.tapAndAHalfWindow
+        onPointerMoved?(trackpadCursor)
+    }
+
+    private func trackpadTouchMovedHandler(_ touch: UITouch) {
+        let pt = touch.location(in: self)
+        guard let last = trackpadLastPoint else { trackpadLastPoint = pt; return }
+        let dx = pt.x - last.x
+        let dy = pt.y - last.y
+        trackpadLastPoint = pt
+
+        // Once the finger leaves a small slop radius it's a move (not a
+        // tap). If a drag was armed, press the button now to start it.
+        if !trackpadTouchMoved, let origin = trackpadGestureOrigin,
+           hypot(pt.x - origin.x, pt.y - origin.y) >= Self.trackpadTapSlop {
+            trackpadTouchMoved = true
+            if dragLockArmed {
+                trackpadDragging = true
+                let pos = mapToCanvas(trackpadCursor)
+                inputManager?.mouseMove(x: Int32(pos.x), y: Int32(pos.y))
+                inputManager?.mouseButton(0, pressed: true)
+            }
+        }
+        guard trackpadTouchMoved else { return }
+
+        trackpadCursor.x = min(max(trackpadCursor.x + dx * Self.trackpadSensitivity, 0), bounds.width)
+        trackpadCursor.y = min(max(trackpadCursor.y + dy * Self.trackpadSensitivity, 0), bounds.height)
+        let pos = mapToCanvas(trackpadCursor)
+        inputManager?.mouseMove(x: Int32(pos.x), y: Int32(pos.y))
+        onPointerMoved?(trackpadCursor)
+    }
+
+    private func trackpadTouchEnded(_ touch: UITouch) {
+        if trackpadDragging {
+            inputManager?.mouseButton(0, pressed: false)
+            trackpadDragging = false
+        } else if !trackpadTouchMoved {
+            // A tap → left click at the cursor's current position.
+            let pos = mapToCanvas(trackpadCursor)
+            inputManager?.mouseMove(x: Int32(pos.x), y: Int32(pos.y))
+            inputManager?.mouseButton(0, pressed: true)
+            inputManager?.mouseButton(0, pressed: false)
+            lastTapEndTime = touch.timestamp
+        }
+        dragLockArmed = false
+        trackpadLastPoint = nil
+        trackpadGestureOrigin = nil
+        trackpadTouchMoved = false
     }
 
     /// Midpoint of a set of touches in view coordinates.
@@ -279,9 +393,13 @@ public final class InputCaptureView: UIView, UIKeyInput, UIPointerInteractionDel
         inputManager?.scroll(dx: Double(translation.x) * 0.5, dy: Double(translation.y) * 0.5)
     }
 
-    /// Two-finger tap → right click.
+    /// Two-finger tap → right click. In trackpad mode the click lands at
+    /// the tracked cursor (not the fingers); in touchscreen mode it
+    /// lands where the fingers tapped.
     @objc private func handleSecondaryTap(_ gesture: UITapGestureRecognizer) {
-        let pos = mapToCanvas(gesture.location(in: self))
+        let pos = trackpadMode
+            ? mapToCanvas(trackpadCursor)
+            : mapToCanvas(gesture.location(in: self))
         inputManager?.mouseMove(x: Int32(pos.x), y: Int32(pos.y))
         inputManager?.mouseButton(1, pressed: true)  // right down
         inputManager?.mouseButton(1, pressed: false)  // right up
