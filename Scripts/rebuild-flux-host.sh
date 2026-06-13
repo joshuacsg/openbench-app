@@ -60,6 +60,33 @@ if [[ ! -x "$BUILT_BIN" ]]; then
   exit 1
 fi
 
+# --- stable code signature (so TCC permissions persist across rebuilds) ------
+# flux-host (NOT the menu-bar app) is the process that calls ScreenCaptureKit +
+# CGEvent, so macOS TCC tracks IT for Screen Recording / Accessibility. cargo's
+# default ad-hoc signature has a cdhash-based designated requirement that
+# changes on every build → re-grant every time. Re-sign with a stable Apple
+# Development identity + a fixed identifier so the requirement becomes
+# identity-based and the grant sticks. Override via FLUX_SIGN_IDENTITY; set it
+# to empty to skip signing.
+if [[ -z "${FLUX_SIGN_IDENTITY+x}" ]]; then
+  SIGN_ID="$(security find-identity -v -p codesigning 2>/dev/null \
+    | grep -m1 'Apple Development' | sed -E 's/.*"(.*)".*/\1/' || true)"
+else
+  SIGN_ID="$FLUX_SIGN_IDENTITY"
+fi
+if [[ -n "$SIGN_ID" ]]; then
+  echo "→ codesign flux-host as \"$SIGN_ID\" (stable TCC identity)..."
+  if codesign --force --sign "$SIGN_ID" \
+       --identifier com.joshiee.fastport.fluxhost "$BUILT_BIN"; then
+    echo "✓ signed — designated requirement is now identity-based (grant persists)"
+  else
+    echo "⚠ codesign failed — continuing with the existing signature" >&2
+  fi
+else
+  echo "⚠ no Apple Development identity found — flux-host stays ad-hoc;"
+  echo "  Screen Recording / Accessibility will re-prompt on each rebuild."
+fi
+
 # --- install ----------------------------------------------------------------
 # If the build already lands on the canonical path (default sibling FLUX_ROOT
 # == $HOME/Documents/GitHub/flux), there's nothing to link — the app already
