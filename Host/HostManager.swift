@@ -78,6 +78,12 @@ final class HostManager: ObservableObject {
     // and cost ~20% more packets.
     private let maxPayload: UInt32 = 1400
 
+    /// flux-host stdout/stderr is mirrored here so the engine log (AIMD /
+    /// pd / FEC / resolution-step lines) is readable on disk, not just in
+    /// Xcode's console. Truncated on each stream start.
+    static let logFileURL = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Logs/flux-host.log")
+
     init() {
         let defaults = UserDefaults.standard
         let stored = { (key: String, fallback: UInt32) -> UInt32 in
@@ -155,6 +161,11 @@ final class HostManager: ObservableObject {
     func start() {
         guard process == nil else { return }
         intentionalStop = false
+
+        // Start a fresh on-disk engine log for this run (readable outside
+        // Xcode's console); best-effort, and print where it landed.
+        try? "".write(to: Self.logFileURL, atomically: false, encoding: .utf8)
+        print("[HostManager] engine log → \(Self.logFileURL.path)")
 
         // Locate the flux-host binary. Check common locations.
         let binary = findFluxHostBinary()
@@ -281,8 +292,22 @@ final class HostManager: ObservableObject {
     // MARK: - Output parsing
 
     /// Parse flux-host log lines for stats and status updates.
+    /// Append raw engine output to the on-disk log (best-effort, so a
+    /// log-write failure never affects streaming).
+    static func appendToLog(_ text: String) {
+        guard let data = text.data(using: .utf8) else { return }
+        if let h = try? FileHandle(forWritingTo: logFileURL) {
+            defer { try? h.close() }
+            _ = try? h.seekToEnd()
+            try? h.write(contentsOf: data)
+        } else {
+            try? data.write(to: logFileURL)
+        }
+    }
+
     private func parseOutput(_ text: String) {
         print("[flux-host] \(text)")
+        Self.appendToLog(text)
         for line in text.components(separatedBy: .newlines) {
             if line.contains("stream stats") {
                 if let fpsMatch = line.range(of: #"fps=(\d+)"#, options: .regularExpression) {
