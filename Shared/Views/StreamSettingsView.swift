@@ -98,11 +98,9 @@ public struct StreamSettingsView: View {
                 .foregroundStyle(.white.opacity(0.85))
         }
         .menuStyle(.borderlessButton)
-        .onAppear {
-            // Assert the viewer's settings on every (re)connect so the
-            // host always matches what the picker shows.
-            apply()
-        }
+        // No auto-assert on connect: the host is the source of truth for
+        // the active settings, which the viewer adopts from the Welcome
+        // (two-way settings). Picking an option here still applies it.
     }
 
     private func apply() {

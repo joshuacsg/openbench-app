@@ -119,9 +119,15 @@ final class HostManager: ObservableObject {
     /// Persist a changed setting and restart the stream (debounced) so
     /// it takes effect — encoder/capture parameters are fixed at
     /// subprocess launch.
+    /// True while we're mirroring settings FROM the host (a viewer-
+    /// initiated change): persist the displayed value but don't kick off
+    /// another restart — the host already applied it.
+    private var applyingRemoteSettings = false
+
     private func persistAndRestart<T: Equatable>(_ value: T, key: String, old: T) {
         guard value != old else { return }
         UserDefaults.standard.set(value as? UInt32 ?? 0, forKey: key)
+        guard !applyingRemoteSettings else { return }
         restartDebounced()
     }
 
@@ -305,7 +311,11 @@ final class HostManager: ObservableObject {
         }
     }
 
-    private func parseOutput(_ text: String) {
+    private func parseOutput(_ rawText: String) {
+        // Strip ANSI color codes the tracing subscriber emits so the regex
+        // parsing (and the on-disk log) stay clean.
+        let text = rawText.replacingOccurrences(
+            of: "\u{1B}\\[[0-9;]*m", with: "", options: .regularExpression)
         print("[flux-host] \(text)")
         Self.appendToLog(text)
         for line in text.components(separatedBy: .newlines) {
@@ -331,6 +341,18 @@ final class HostManager: ObservableObject {
                 statusMessage = "Client disconnected"
                 currentFps = 0
                 bitrateMbps = 0
+            } else if line.contains("effective stream settings") {
+                // Two-way settings: mirror the host's active settings into
+                // the menu-bar UI without triggering another restart (a
+                // viewer-initiated change already applied on the host).
+                applyingRemoteSettings = true
+                if let m = line.range(of: #"fps=(\d+)"#, options: .regularExpression),
+                   let v = UInt32(line[m].dropFirst(4)) { fps = v }
+                if let m = line.range(of: #"bitrate_kbps=(\d+)"#, options: .regularExpression),
+                   let v = UInt32(line[m].dropFirst(13)) { bitrateKbps = v }
+                if let m = line.range(of: #"max_dimension_px=(\d+)"#, options: .regularExpression),
+                   let v = UInt32(line[m].dropFirst(17)) { maxDimension = v }
+                applyingRemoteSettings = false
             }
         }
     }

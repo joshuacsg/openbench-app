@@ -910,6 +910,18 @@ public final class StreamSession: ObservableObject {
                         return DisplayInfo(id: id, name: name, width: w, height: h)
                     }
                 }
+                // Two-way settings: adopt the host's current settings into
+                // the picker (the host is the source of truth). Only when
+                // the host actually reports them — older hosts omit them.
+                if let hostFps = fields["fps"] as? Int {
+                    UserDefaults.standard.set(hostFps, forKey: "stream.fps")
+                    if let hostBitrate = fields["bitrate_kbps"] as? Int {
+                        UserDefaults.standard.set(hostBitrate, forKey: "stream.bitrateKbps")
+                    }
+                    // null/absent max_dimension = native (0 in the picker).
+                    UserDefaults.standard.set(
+                        fields["max_dimension"] as? Int ?? 0, forKey: "stream.maxDimension")
+                }
             }
 
         case "ClipboardSync":
