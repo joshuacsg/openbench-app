@@ -97,6 +97,13 @@ public final class StreamSession: ObservableObject {
         public var framesDecoded: UInt64 = 0
         public var bytesReceived: UInt64 = 0
         public var currentFps: Double = 0
+        /// Host pipeline delay (capture → encode done), in ms, rolling.
+        /// Only populated when the host emits FrameTiming (FLUX_FRAME_TIMING).
+        /// `nil` until the first correlated frame arrives, so the HUD can
+        /// hide the breakdown when no timing data is present.
+        public var hostPdMs: Double? = nil
+        /// Host send-queue delay (encode done → sent), in ms, rolling.
+        public var hostQueueMs: Double? = nil
     }
 
     private var pixelConnection: NWConnection?
@@ -129,6 +136,31 @@ public final class StreamSession: ObservableObject {
     private var lagBaselineUs: Int64?
     private var skippingUntilKeyframe = false
     private static let maxLagMs: Double = 500
+
+    // Host-side FrameTiming correlation. The host (flux-stream, only
+    // when FLUX_FRAME_TIMING is set) sends a FrameTiming control message
+    // per frame; we stash it keyed by capture_us — which equals the
+    // frame's capture timestamp_us carried in the video packet header /
+    // ReassembledFrame.timestampUs — then look it up when that frame is
+    // displayed to break the latency down by host stage.
+    //
+    // All accessed on the receive queue (handleIncomingControl and
+    // handleCompletedFrame both run there), so no extra locking is
+    // needed. Bounded to the most recent entries; lossy QUIC datagrams
+    // mean some timing messages or frames go missing, so eviction is
+    // by age (insertion order) rather than exact pairing.
+    private struct HostFrameTiming {
+        let encodeDoneUs: UInt64
+        let sentUs: UInt64
+    }
+    private var frameTimings: [UInt64: HostFrameTiming] = [:]
+    private var frameTimingOrder: [UInt64] = []   // capture_us, oldest first
+    private static let maxFrameTimings = 240       // ~2 s at 120 fps
+    /// Rolling host PD / queue, exponentially smoothed. Flushed to the
+    /// @Published stats only on change of the displayed frame so the HUD
+    /// doesn't churn the main actor.
+    private var rollingHostPdMs: Double?
+    private var rollingHostQueueMs: Double?
     /// Require this many CONSECUTIVE over-threshold frames before
     /// dropping to live, so a single anomalous timestamp (e.g. a host
     /// idle re-emit) can't trigger a spurious keyframe storm on an
@@ -291,10 +323,66 @@ public final class StreamSession: ObservableObject {
         rttMs = nil
     }
 
+    /// Store one host FrameTiming, keyed by capture_us, with age-bounded
+    /// eviction. Runs on the receive queue.
+    private func storeFrameTiming(captureUs: UInt64, encodeDoneUs: UInt64, sentUs: UInt64) {
+        if frameTimings[captureUs] == nil {
+            frameTimingOrder.append(captureUs)
+        }
+        frameTimings[captureUs] = HostFrameTiming(encodeDoneUs: encodeDoneUs, sentUs: sentUs)
+        while frameTimingOrder.count > Self.maxFrameTimings {
+            let oldest = frameTimingOrder.removeFirst()
+            frameTimings.removeValue(forKey: oldest)
+        }
+    }
+
+    /// Correlate the displayed frame's capture timestamp with a stored
+    /// host FrameTiming and fold the host PD / queue split into the
+    /// rolling values. Returns true if a matching timing was found (so
+    /// the HUD breakdown becomes available). Runs on the receive queue.
+    @discardableResult
+    private func correlateHostTiming(captureUs: UInt64) -> Bool {
+        guard let t = frameTimings[captureUs] else { return false }
+        // Host-monotonic µs from the same clock: differences are valid
+        // even though the host clock base differs from ours. Guard
+        // against a non-monotonic pair (clock glitch / reordered fields)
+        // producing a negative span.
+        let pdMs    = t.encodeDoneUs >= captureUs
+            ? Double(t.encodeDoneUs &- captureUs) / 1000.0 : 0
+        let queueMs = t.sentUs >= t.encodeDoneUs
+            ? Double(t.sentUs &- t.encodeDoneUs) / 1000.0 : 0
+
+        // Light EMA so the HUD reads a stable number, not per-frame jitter.
+        let alpha = 0.2
+        rollingHostPdMs    = rollingHostPdMs.map    { $0 * (1 - alpha) + pdMs * alpha }    ?? pdMs
+        rollingHostQueueMs = rollingHostQueueMs.map { $0 * (1 - alpha) + queueMs * alpha } ?? queueMs
+
+        // Drop the consumed entry (and anything older — those frames are
+        // already on screen or were dropped) to keep the map small.
+        if let idx = frameTimingOrder.firstIndex(of: captureUs) {
+            for key in frameTimingOrder[...idx] { frameTimings.removeValue(forKey: key) }
+            frameTimingOrder.removeSubrange(...idx)
+        } else {
+            frameTimings.removeValue(forKey: captureUs)
+        }
+
+        let pd = rollingHostPdMs
+        let queue = rollingHostQueueMs
+        Task { @MainActor [weak self] in
+            self?.stats.hostPdMs = pd
+            self?.stats.hostQueueMs = queue
+        }
+        return true
+    }
+
     /// Decode a reassembled frame, unless we've fallen behind live —
     /// then drain without decoding until the next keyframe so delay
     /// stays bounded instead of compounding.
     private func handleCompletedFrame(_ frame: FrameReassembler.ReassembledFrame) {
+        // Correlate host timing for this frame (no-op unless the host is
+        // emitting FrameTiming). frame.timestampUs IS the capture_us key.
+        correlateHostTiming(captureUs: frame.timestampUs)
+
         // Monotonic clock: CFAbsoluteTime is wall time and NTP steps
         // would permanently poison the lag baseline (a backwards step
         // ratchets the minimum down → every later frame reads as lagged
@@ -534,6 +622,10 @@ public final class StreamSession: ObservableObject {
         lagBaselineUs = nil
         skippingUntilKeyframe = false
         consecutiveLaggedFrames = 0
+        frameTimings.removeAll()
+        frameTimingOrder.removeAll()
+        rollingHostPdMs = nil
+        rollingHostQueueMs = nil
     }
 
     public func disconnect() {
@@ -834,6 +926,19 @@ public final class StreamSession: ObservableObject {
             Task { @MainActor [weak self] in
                 self?.onPong?(nonce)
             }
+
+        case "FrameTiming":
+            // Host timing breakdown (only when FLUX_FRAME_TIMING is set
+            // on the host). Stash keyed by capture_us; correlated when
+            // the matching frame is displayed in handleCompletedFrame.
+            // Runs on the receive queue, same as handleCompletedFrame —
+            // no locking needed.
+            guard let fields = value as? [String: Any],
+                  let captureUs    = fields["capture_us"]     as? UInt64,
+                  let encodeDoneUs = fields["encode_done_us"] as? UInt64,
+                  let sentUs       = fields["sent_us"]        as? UInt64 else { return }
+            storeFrameTiming(captureUs: captureUs,
+                             encodeDoneUs: encodeDoneUs, sentUs: sentUs)
 
         case "DisplayThumbnailChunk":
             guard let fields = value as? [String: Any],

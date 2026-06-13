@@ -51,6 +51,14 @@ struct HostSettingsView: View {
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
                 .fixedSize(horizontal: false, vertical: true)
+
+            Divider()
+
+            Toggle("Latency HUD (debug)", isOn: $hostManager.frameTimingEnabled)
+            Text("Emits per-frame timing so the viewer HUD can show where host latency goes (capture → encode → send). Off in production. Restarts the stream.")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .pickerStyle(.menu)
         .controlSize(.small)

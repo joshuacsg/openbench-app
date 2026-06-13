@@ -50,6 +50,14 @@ public enum ControlMessage {
     /// and send them back as DisplayThumbnailChunk messages (populates
     /// the display sidebar). The host rate-limits compliance.
     case requestDisplayThumbnails
+    /// Host → viewer per-frame timing breakdown (host-monotonic µs),
+    /// emitted by flux-stream only when env FLUX_FRAME_TIMING is set.
+    /// `captureUs` matches the frame's capture timestamp_us (the same
+    /// value carried in the video packet header / ReassembledFrame), so
+    /// the viewer can correlate a displayed frame back to where the host
+    /// spent its time: PD = encodeDoneUs - captureUs, host queue =
+    /// sentUs - encodeDoneUs.
+    case frameTiming(frameId: UInt64, captureUs: UInt64, encodeDoneUs: UInt64, sentUs: UInt64)
 
     /// Encode to the serde externally-tagged JSON form.
     public func toJSON() -> Data? {
@@ -98,6 +106,15 @@ public enum ControlMessage {
             if let bitrateKbps { fields["bitrate_kbps"] = bitrateKbps }
             if let maxDimension { fields["max_dimension"] = maxDimension }
             dict = ["SetStreamSettings": fields]
+        case .frameTiming(let frameId, let captureUs, let encodeDoneUs, let sentUs):
+            // Host → viewer only; the viewer never sends this, but the
+            // switch must stay exhaustive. Encode the symmetric form.
+            dict = ["FrameTiming": [
+                "frame_id": frameId,
+                "capture_us": captureUs,
+                "encode_done_us": encodeDoneUs,
+                "sent_us": sentUs,
+            ]]
         }
         return try? JSONSerialization.data(withJSONObject: dict)
     }
@@ -129,6 +146,16 @@ public enum ControlMessage {
                 return .clipboardSync(text: text)
             }
             return nil
+        case "FrameTiming":
+            // Host → viewer timing breakdown. JSONSerialization decodes
+            // these as NSNumber; `as? UInt64` succeeds for integral
+            // values in range (microsecond timestamps need the full u64).
+            guard let frameId      = fields["frame_id"]       as? UInt64,
+                  let captureUs    = fields["capture_us"]     as? UInt64,
+                  let encodeDoneUs = fields["encode_done_us"] as? UInt64,
+                  let sentUs       = fields["sent_us"]        as? UInt64 else { return nil }
+            return .frameTiming(frameId: frameId, captureUs: captureUs,
+                                encodeDoneUs: encodeDoneUs, sentUs: sentUs)
         default:
             return nil
         }

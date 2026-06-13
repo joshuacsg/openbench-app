@@ -741,7 +741,10 @@ struct StreamView: View {
         case .connected:
             let fps = Int(session.stats.currentFps)
             let rtt = session.rttMs.map { " · \($0)ms" } ?? ""
-            return "\(fps) fps\(rtt)"
+            // Host pipeline delay (capture → encode done), shown only
+            // when the host emits FrameTiming (FLUX_FRAME_TIMING set).
+            let pd = session.stats.hostPdMs.map { " · pd \(Int($0.rounded()))ms" } ?? ""
+            return "\(fps) fps\(rtt)\(pd)"
         case .connecting: return "Connecting…"
         case .disconnected: return "Disconnected"
         case .failed: return "Reconnecting…"

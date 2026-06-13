@@ -49,9 +49,25 @@ final class HostManager: ObservableObject {
         didSet { persistAndRestart(maxDimension, key: Self.maxDimensionKey, old: oldValue) }
     }
 
+    /// Debug latency HUD: when on, the spawned flux-stream subprocess
+    /// gets FLUX_FRAME_TIMING=1 in its environment, so it emits a
+    /// per-frame FrameTiming control message and the viewer HUD can show
+    /// where the host spends its milliseconds (capture → encode → send).
+    /// Off in production so we aren't emitting an extra control datagram
+    /// per frame. Toggling it restarts the subprocess (env is fixed at
+    /// launch).
+    @Published var frameTimingEnabled: Bool {
+        didSet {
+            guard frameTimingEnabled != oldValue else { return }
+            UserDefaults.standard.set(frameTimingEnabled, forKey: Self.frameTimingKey)
+            restartDebounced()
+        }
+    }
+
     private static let fpsKey = "host.fps"
     private static let bitrateKey = "host.bitrateKbps"
     private static let maxDimensionKey = "host.maxDimension"
+    private static let frameTimingKey = "host.frameTiming"
 
     // Fixed plumbing (not user-facing).
     private let pixelPort: UInt16 = 9000
@@ -73,6 +89,8 @@ final class HostManager: ObservableObject {
         fps = stored(Self.fpsKey, 30)
         bitrateKbps = stored(Self.bitrateKey, 5_000)
         maxDimension = stored(Self.maxDimensionKey, 1920)
+        // Off by default (production); key absent ⇒ false.
+        frameTimingEnabled = defaults.bool(forKey: Self.frameTimingKey)
         checkPermissions()
 
         // `open "FastPort Host.app" --args --autostart` starts the
@@ -167,6 +185,17 @@ final class HostManager: ObservableObject {
         // first display anyway, and this avoids a restart at connect.
         args += ["--display-id", "\(CGMainDisplayID())"]
         proc.arguments = args
+
+        // Inherit the launcher's environment, then opt into the host's
+        // per-frame FrameTiming control messages when the debug HUD is
+        // on. flux-stream reads FLUX_FRAME_TIMING once at startup (mere
+        // presence enables it), so this is fixed for the subprocess'
+        // lifetime — toggling frameTimingEnabled restarts it.
+        if frameTimingEnabled {
+            var env = ProcessInfo.processInfo.environment
+            env["FLUX_FRAME_TIMING"] = "1"
+            proc.environment = env
+        }
 
         // Merge stdout+stderr so we can parse stats lines.
         let pipe = Pipe()
