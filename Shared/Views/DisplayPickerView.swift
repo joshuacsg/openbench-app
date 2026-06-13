@@ -28,20 +28,19 @@ public struct DisplayPickerView: View {
     private var selectedLabel: String {
         if let id = selectedDisplayID,
            let display = displays.first(where: { $0.id == id }) {
-            return "\(display.width)×\(display.height)"
+            return display.name.isEmpty ? "\(display.width)×\(display.height)" : display.name
         }
-        return "Unified Display"
+        return "All Displays"
     }
 
     public var body: some View {
         Menu {
-            // "Unified" option — sends nil display ID
             Button {
                 selectedDisplayID = nil
                 onSelect(nil)
             } label: {
                 HStack {
-                    Text("Unified Display")
+                    Text("All Displays")
                     if selectedDisplayID == nil {
                         Image(systemName: "checkmark")
                     }
@@ -56,7 +55,9 @@ public struct DisplayPickerView: View {
                         onSelect(display.id)
                     } label: {
                         HStack {
-                            Text("Display \(display.id) (\(display.width)×\(display.height))")
+                            Text(display.name.isEmpty
+                                ? "\(display.width)×\(display.height)"
+                                : "\(display.name) (\(display.width)×\(display.height))")
                             if selectedDisplayID == display.id {
                                 Image(systemName: "checkmark")
                             }

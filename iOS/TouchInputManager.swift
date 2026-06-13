@@ -45,6 +45,31 @@ public final class InputCaptureView: UIView, UIKeyInput, UIPointerInteractionDel
     /// Pass nil to hide the cursor (e.g. when direct touch begins).
     public var onPointerMoved: ((CGPoint?) -> Void)?
 
+    // MARK: - Viewport zoom/pan state
+
+    /// Current zoom scale (1.0 = fit to view).
+    public private(set) var viewportScale: CGFloat = 1.0
+    /// Current pan offset in view coordinates.
+    public private(set) var viewportOffset: CGPoint = .zero
+
+    /// Callback when viewport transform changes (scale, offset).
+    public var onViewportChanged: ((CGFloat, CGPoint) -> Void)?
+
+    /// Set viewport from external source (e.g. minimap slider).
+    public func setViewport(scale: CGFloat, offset: CGPoint) {
+        viewportScale = scale
+        viewportOffset = offset
+        clampOffset()
+    }
+
+    // Pinch tracking
+    private var pinchStartScale: CGFloat = 1.0
+    private var pinchAnchorInView: CGPoint = .zero
+    private var pinchStartOffset: CGPoint = .zero
+
+    // Pan tracking (single-finger when zoomed)
+    private var panStartOffset: CGPoint = .zero
+
     /// When set to true, becomes first responder to show the soft
     /// keyboard. When false, resigns to hide it.
     public var showKeyboard: Bool = false {
@@ -83,12 +108,24 @@ public final class InputCaptureView: UIView, UIKeyInput, UIPointerInteractionDel
         // Hover gesture for pointer movement without click.
         let hover = UIHoverGestureRecognizer(target: self, action: #selector(handleHover(_:)))
         addGestureRecognizer(hover)
+
+        // Pinch-to-zoom and double-tap-to-zoom disabled — they clash
+        // with cursor/scroll controls. Zoom will be driven from the
+        // minimap (Phase 3) instead.
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
     // Make this view the first responder so it receives key events.
     public override var canBecomeFirstResponder: Bool { true }
+
+    // Tap-vs-drag disambiguation: suppress mouse moves until the touch
+    // travels past this slop radius, so a tap with natural finger
+    // jitter lands as a clean click instead of a 2-pixel drag (which
+    // macOS happily interprets as window-move/text-select).
+    private static let dragSlop: CGFloat = 8
+    private var touchDownViewPoint: CGPoint?
+    private var dragStarted = false
 
     // MARK: - Touch → Mouse
 
@@ -117,6 +154,8 @@ public final class InputCaptureView: UIView, UIKeyInput, UIPointerInteractionDel
         // Single finger or trackpad click → left click.
         let viewPt = touch.location(in: self)
         let pos = mapToCanvas(viewPt)
+        touchDownViewPoint = viewPt
+        dragStarted = false
         inputManager?.mouseMove(x: Int32(pos.x), y: Int32(pos.y))
         inputManager?.mouseButton(0, pressed: true)
         if touch.type == .indirectPointer {
@@ -150,6 +189,13 @@ public final class InputCaptureView: UIView, UIKeyInput, UIPointerInteractionDel
         }
 
         let viewPt = touch.location(in: self)
+        if !dragStarted {
+            guard let start = touchDownViewPoint,
+                  hypot(viewPt.x - start.x, viewPt.y - start.y) >= Self.dragSlop else {
+                return // still within tap jitter — hold position
+            }
+            dragStarted = true
+        }
         let pos = mapToCanvas(viewPt)
         inputManager?.mouseMove(x: Int32(pos.x), y: Int32(pos.y))
         if touch.type == .indirectPointer { onPointerMoved?(viewPt) }
@@ -175,9 +221,14 @@ public final class InputCaptureView: UIView, UIKeyInput, UIPointerInteractionDel
             return
         }
 
-        let viewPt = touch.location(in: self)
-        let pos = mapToCanvas(viewPt)
-        inputManager?.mouseMove(x: Int32(pos.x), y: Int32(pos.y))
+
+        if dragStarted {
+            let viewPt = touch.location(in: self)
+            let pos = mapToCanvas(viewPt)
+            inputManager?.mouseMove(x: Int32(pos.x), y: Int32(pos.y))
+        }
+        touchDownViewPoint = nil
+        dragStarted = false
         inputManager?.mouseButton(0, pressed: false)
         if touch.type == .indirectPointer { pointerButtonDown = false }
     }
@@ -236,6 +287,73 @@ public final class InputCaptureView: UIView, UIKeyInput, UIPointerInteractionDel
         inputManager?.mouseButton(1, pressed: false)  // right up
     }
 
+    // MARK: - Viewport pinch-to-zoom / double-tap reset
+
+    @objc private func handlePinch(_ gesture: UIPinchGestureRecognizer) {
+        switch gesture.state {
+        case .began:
+            pinchStartScale = viewportScale
+            pinchAnchorInView = gesture.location(in: self)
+            pinchStartOffset = viewportOffset
+        case .changed:
+            let newScale = max(1.0, min(pinchStartScale * gesture.scale, 6.0))
+            let ratio = newScale / pinchStartScale
+
+            // Adjust offset so the pinch anchor stays stationary.
+            let anchorOffsetX = pinchAnchorInView.x - bounds.midX
+            let anchorOffsetY = pinchAnchorInView.y - bounds.midY
+            viewportOffset = CGPoint(
+                x: pinchStartOffset.x * ratio + anchorOffsetX * (1 - ratio),
+                y: pinchStartOffset.y * ratio + anchorOffsetY * (1 - ratio)
+            )
+            viewportScale = newScale
+            clampOffset()
+            onViewportChanged?(viewportScale, viewportOffset)
+        case .ended, .cancelled:
+            // Snap to 1x if very close.
+            if viewportScale < 1.05 {
+                viewportScale = 1.0
+                viewportOffset = .zero
+                onViewportChanged?(viewportScale, viewportOffset)
+            }
+        default:
+            break
+        }
+    }
+
+    @objc private func handleDoubleTap(_ gesture: UITapGestureRecognizer) {
+        if viewportScale > 1.05 {
+            // Reset to fit.
+            viewportScale = 1.0
+            viewportOffset = .zero
+        } else {
+            // Zoom to 2x centered on tap point.
+            let tapPt = gesture.location(in: self)
+            let newScale: CGFloat = 2.0
+            let anchorX = tapPt.x - bounds.midX
+            let anchorY = tapPt.y - bounds.midY
+            viewportOffset = CGPoint(
+                x: -anchorX * (newScale - 1),
+                y: -anchorY * (newScale - 1)
+            )
+            viewportScale = newScale
+            clampOffset()
+        }
+        onViewportChanged?(viewportScale, viewportOffset)
+    }
+
+    /// Clamp the offset so the canvas can't be panned out of the view.
+    private func clampOffset() {
+        guard viewportScale > 1.0 else {
+            viewportOffset = .zero
+            return
+        }
+        let maxOffsetX = bounds.width * (viewportScale - 1) / 2
+        let maxOffsetY = bounds.height * (viewportScale - 1) / 2
+        viewportOffset.x = max(-maxOffsetX, min(maxOffsetX, viewportOffset.x))
+        viewportOffset.y = max(-maxOffsetY, min(maxOffsetY, viewportOffset.y))
+    }
+
     // MARK: - Apple Pencil → Stylus samples
 
     private func handlePencilBegan(_ touch: UITouch) {
@@ -276,8 +394,12 @@ public final class InputCaptureView: UIView, UIKeyInput, UIPointerInteractionDel
             x: Float(pos.x),
             y: Float(pos.y),
             pressure: Float(touch.force / max(touch.maximumPossibleForce, 0.001)),
-            tiltX: Float(touch.altitudeAngle),
-            tiltY: Float(touch.azimuthAngle(in: self)),
+            // Convert altitude/azimuth into the wire's normalized tilt
+            // vector: magnitude = zenith / 90°, decomposed by azimuth.
+            tiltX: cos(Float(touch.azimuthAngle(in: self)))
+                * max(0, min(1, (Float.pi / 2 - Float(touch.altitudeAngle)) / (Float.pi / 2))),
+            tiltY: sin(Float(touch.azimuthAngle(in: self)))
+                * max(0, min(1, (Float.pi / 2 - Float(touch.altitudeAngle)) / (Float.pi / 2))),
             predicted: predicted,
             timestampUs: UInt64(touch.timestamp * 1_000_000)
         )
@@ -285,12 +407,35 @@ public final class InputCaptureView: UIView, UIKeyInput, UIPointerInteractionDel
         inputManager?.sendStylus?(sample)
     }
 
+    // MARK: - Hardware keyboard chords (pressesBegan)
+    //
+    // Plain typing flows through UIKeyInput.insertText below; presses
+    // handle what insertText can't see — modifier chords (⌘C, ⌃A…) and
+    // non-text keys (arrows, Esc, F-keys). The host injects them as
+    // CGEvents with real keycodes + flags.
+
+    private func modifierBits(_ flags: UIKeyModifierFlags) -> UInt16 {
+        var bits: UInt16 = 0
+        if flags.contains(.shift) { bits |= 1 }
+        if flags.contains(.control) { bits |= 2 }
+        if flags.contains(.alternate) { bits |= 4 }
+        if flags.contains(.command) { bits |= 8 }
+        return bits
+    }
+
     // MARK: - Hardware keyboard (via UIKeyInput)
 
     public var hasText: Bool { true }
 
     public func insertText(_ text: String) {
-        // Single character from hardware keyboard → TextInput
+        // Return arrives as insertText("\n") from UIKeyInput — send it
+        // as a real Enter keypress (the host's text path can't type
+        // control characters; see flux-input TextInput handling).
+        if text == "\n" || text == "\r" {
+            inputManager?.keyDown("Enter")
+            inputManager?.keyUp("Enter")
+            return
+        }
         inputManager?.textInput(text)
     }
 
@@ -301,11 +446,15 @@ public final class InputCaptureView: UIView, UIKeyInput, UIPointerInteractionDel
 
     public override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
         for press in presses {
-            if let key = press.key {
-                let name = uiKeyToName(key)
-                if let name = name {
-                    inputManager?.keyDown(name)
-                }
+            if let key = press.key, let name = uiKeyToName(key) {
+                // Carry the chord modifiers (1=Shift 2=Ctrl 4=Alt
+                // 8=Cmd) so the host stamps the right CGEventFlags —
+                // ⌘C from a Magic Keyboard works end-to-end now.
+                inputManager?.sendControl?(.keyEvent(
+                    key: name,
+                    modifiers: modifierBits(key.modifierFlags),
+                    pressed: true
+                ))
             }
         }
         // Don't call super — we consume the events.
@@ -313,11 +462,12 @@ public final class InputCaptureView: UIView, UIKeyInput, UIPointerInteractionDel
 
     public override func pressesEnded(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
         for press in presses {
-            if let key = press.key {
-                let name = uiKeyToName(key)
-                if let name = name {
-                    inputManager?.keyUp(name)
-                }
+            if let key = press.key, let name = uiKeyToName(key) {
+                inputManager?.sendControl?(.keyEvent(
+                    key: name,
+                    modifiers: modifierBits(key.modifierFlags),
+                    pressed: false
+                ))
             }
         }
     }
@@ -325,12 +475,21 @@ public final class InputCaptureView: UIView, UIKeyInput, UIPointerInteractionDel
     // MARK: - Coordinate mapping
 
     /// Map UIKit view-local point → canvas pixel coordinate.
-    /// Assumes the Metal layer fills the view with aspect-fit.
+    /// Accounts for aspect-fit layout AND viewport zoom/pan.
     private func mapToCanvas(_ point: CGPoint) -> CGPoint {
         guard canvasSize.width > 0, canvasSize.height > 0,
               bounds.width > 0, bounds.height > 0 else {
             return point
         }
+
+        // Reverse the viewport transform (zoom + pan) first.
+        // The Metal view is scaled around the center and offset.
+        let cx = bounds.midX
+        let cy = bounds.midY
+        let unzoomedX = (point.x - cx - viewportOffset.x) / viewportScale + cx
+        let unzoomedY = (point.y - cy - viewportOffset.y) / viewportScale + cy
+
+        // Then apply the aspect-fit mapping.
         let viewAspect = bounds.width / bounds.height
         let canvasAspect = canvasSize.width / canvasSize.height
 
@@ -338,19 +497,17 @@ public final class InputCaptureView: UIView, UIKeyInput, UIPointerInteractionDel
         let offsetX: CGFloat
         let offsetY: CGFloat
         if canvasAspect > viewAspect {
-            // Canvas wider than view → pillar-boxed (bars top/bottom)
             scale = bounds.width / canvasSize.width
             offsetX = 0
             offsetY = (bounds.height - canvasSize.height * scale) / 2
         } else {
-            // Canvas taller → letter-boxed (bars left/right)
             scale = bounds.height / canvasSize.height
             offsetX = (bounds.width - canvasSize.width * scale) / 2
             offsetY = 0
         }
         return CGPoint(
-            x: (point.x - offsetX) / scale,
-            y: (point.y - offsetY) / scale
+            x: (unzoomedX - offsetX) / scale,
+            y: (unzoomedY - offsetY) / scale
         )
     }
 

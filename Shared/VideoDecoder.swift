@@ -20,6 +20,15 @@ public final class HEVCDecoder {
     private var session: VTDecompressionSession?
     private var formatDesc: CMVideoFormatDescription?
 
+    /// When true, discard all input until fresh VPS/SPS/PPS arrive.
+    /// Set by `reset()`, cleared by `configureSession()`.
+    private var waitingForKeyframe = false
+
+    /// Concatenated VPS/SPS/PPS bytes of the live session. Hosts attach
+    /// param sets to every keyframe; rebuilding the session each time
+    /// cost a multi-ms stall per keyframe for nothing.
+    private var currentParamSets = Data()
+
     /// Called on the decode thread with each decoded pixel buffer.
     public var onDecodedFrame: ((CVPixelBuffer, UInt64) -> Void)?
 
@@ -29,6 +38,19 @@ public final class HEVCDecoder {
         if let s = session {
             VTDecompressionSessionInvalidate(s)
         }
+    }
+
+    /// Tear down the current session and discard all input until a
+    /// fresh keyframe with VPS/SPS/PPS arrives. Call this when the
+    /// capture source changes (display switch).
+    public func reset() {
+        if let s = session {
+            VTDecompressionSessionInvalidate(s)
+        }
+        session = nil
+        formatDesc = nil
+        currentParamSets = Data()
+        waitingForKeyframe = true
     }
 
     /// Decode one Annex-B access unit. The first call must be a
@@ -51,10 +73,25 @@ public final class HEVCDecoder {
             }
         }
 
+        // After a reset, discard everything until we see fresh parameter
+        // sets (VPS/SPS/PPS) which arrive with the first keyframe from
+        // the new display.
+        if waitingForKeyframe && paramSets.isEmpty {
+            return
+        }
+
         // If we got new parameter sets, (re)create the format description
-        // and decompression session.
+        // and decompression session — but only when they actually
+        // changed (every keyframe carries them).
         if !paramSets.isEmpty {
-            try configureSession(paramSets: paramSets)
+            var concat = Data()
+            for ps in paramSets { concat.append(ps) }
+            if concat != currentParamSets || session == nil {
+                try configureSession(paramSets: paramSets)
+                currentParamSets = concat
+            } else {
+                waitingForKeyframe = false
+            }
         }
 
         guard let session = session, let _ = formatDesc else {
@@ -79,10 +116,22 @@ public final class HEVCDecoder {
             session = nil
         }
 
-        // Build the format description from VPS/SPS/PPS.
-        let pointers = paramSets.map { Array($0) }
-        var sizes = pointers.map { $0.count }
-        let ptrs = pointers.map { $0.withUnsafeBufferPointer { $0.baseAddress! } }
+        // Build the format description from VPS/SPS/PPS. The param-set
+        // bytes are copied into manually allocated buffers that stay
+        // alive for the whole call — capturing `baseAddress` out of a
+        // `withUnsafeBufferPointer` closure (the previous code) is
+        // use-after-scope UB that only ever worked by allocation luck,
+        // and it broke deterministically in Release builds: every
+        // format-description create failed with -12712 and the viewer
+        // decoded nothing.
+        let buffers: [UnsafeMutableBufferPointer<UInt8>] = paramSets.map { ps in
+            let buf = UnsafeMutableBufferPointer<UInt8>.allocate(capacity: ps.count)
+            _ = buf.initialize(from: ps)
+            return buf
+        }
+        defer { buffers.forEach { $0.deallocate() } }
+        let ptrs: [UnsafePointer<UInt8>] = buffers.map { UnsafePointer($0.baseAddress!) }
+        var sizes = buffers.map { $0.count }
 
         var desc: CMVideoFormatDescription?
         let status = ptrs.withUnsafeBufferPointer { ptrsBuf in
@@ -102,6 +151,7 @@ public final class HEVCDecoder {
             throw DecoderError.formatDescriptionFailed(status)
         }
         formatDesc = desc
+        waitingForKeyframe = false
 
         // Create a new decompression session.
         let outputAttrs: [String: Any] = [
@@ -125,23 +175,33 @@ public final class HEVCDecoder {
     // MARK: - Decode one NAL
 
     private func decodeAVCC(_ avcc: Data, session: VTDecompressionSession, timestampUs: UInt64) throws {
-        // Wrap in CMBlockBuffer.
+        // Wrap in a CMBlockBuffer that owns its own memory and copy the
+        // NAL bytes in. (Pointing the block buffer at Swift-managed
+        // memory with kCFAllocatorNull is use-after-scope UB once the
+        // pointer closure returns — it only ever worked here because
+        // the decode below is synchronous.)
         var blockBuffer: CMBlockBuffer?
-        let avccBytes = Array(avcc)
-        avccBytes.withUnsafeBufferPointer { buf in
-            CMBlockBufferCreateWithMemoryBlock(
-                allocator: kCFAllocatorDefault,
-                memoryBlock: UnsafeMutableRawPointer(mutating: buf.baseAddress!),
-                blockLength: buf.count,
-                blockAllocator: kCFAllocatorNull,
-                customBlockSource: nil,
-                offsetToData: 0,
-                dataLength: buf.count,
-                flags: 0,
-                blockBufferOut: &blockBuffer
+        CMBlockBufferCreateWithMemoryBlock(
+            allocator: kCFAllocatorDefault,
+            memoryBlock: nil,
+            blockLength: avcc.count,
+            blockAllocator: kCFAllocatorDefault,
+            customBlockSource: nil,
+            offsetToData: 0,
+            dataLength: avcc.count,
+            flags: kCMBlockBufferAssureMemoryNowFlag,
+            blockBufferOut: &blockBuffer
+        )
+        guard let blockBuffer = blockBuffer else { return }
+        let copyStatus = avcc.withUnsafeBytes { raw in
+            CMBlockBufferReplaceDataBytes(
+                with: raw.baseAddress!,
+                blockBuffer: blockBuffer,
+                offsetIntoDestination: 0,
+                dataLength: avcc.count
             )
         }
-        guard let blockBuffer = blockBuffer else { return }
+        guard copyStatus == noErr else { return }
 
         // Wrap in CMSampleBuffer.
         var sampleBuffer: CMSampleBuffer?

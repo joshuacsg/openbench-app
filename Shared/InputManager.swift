@@ -34,6 +34,22 @@ public enum ControlMessage {
     case setActiveDisplay(displayId: UInt32?)
     case ping(nonce: UInt64)
     case pong(nonce: UInt64)
+    /// Ask the host to encode the next frame as a keyframe (loss
+    /// recovery — sent when the reassembler discards an incomplete
+    /// frame). The host rate-limits compliance.
+    case requestKeyframe
+    /// Periodic receiver-side quality report; feeds the host's AIMD
+    /// bitrate controller.
+    case qualityFeedback(rttMs: UInt32, lossPct: Float, bandwidthKbps: UInt32)
+    /// Viewer-driven stream quality settings. nil fields are left
+    /// unchanged on the host. Bitrate applies live; fps/maxDimension
+    /// restart the host capture pipeline (brief interruption).
+    /// maxDimension 0 = native resolution.
+    case setStreamSettings(fps: UInt32?, bitrateKbps: UInt32?, maxDimension: UInt32?)
+    /// Ask the host to capture a small JPEG snapshot of every display
+    /// and send them back as DisplayThumbnailChunk messages (populates
+    /// the display sidebar). The host rate-limits compliance.
+    case requestDisplayThumbnails
 
     /// Encode to the serde externally-tagged JSON form.
     public func toJSON() -> Data? {
@@ -64,6 +80,24 @@ public enum ControlMessage {
             dict = ["Ping": ["nonce": nonce]]
         case .pong(let nonce):
             dict = ["Pong": ["nonce": nonce]]
+        case .requestKeyframe:
+            // Unit variant in serde = bare string
+            return "\"RequestKeyframe\"".data(using: .utf8)
+        case .requestDisplayThumbnails:
+            // Unit variant in serde = bare string
+            return "\"RequestDisplayThumbnails\"".data(using: .utf8)
+        case .qualityFeedback(let rttMs, let lossPct, let bandwidthKbps):
+            dict = ["QualityFeedback": [
+                "rtt_ms": rttMs,
+                "loss_pct": lossPct,
+                "bandwidth_kbps": bandwidthKbps,
+            ]]
+        case .setStreamSettings(let fps, let bitrateKbps, let maxDimension):
+            var fields: [String: Any] = [:]
+            if let fps { fields["fps"] = fps }
+            if let bitrateKbps { fields["bitrate_kbps"] = bitrateKbps }
+            if let maxDimension { fields["max_dimension"] = maxDimension }
+            dict = ["SetStreamSettings": fields]
         }
         return try? JSONSerialization.data(withJSONObject: dict)
     }
@@ -124,12 +158,50 @@ public final class InputManager: ObservableObject {
         sendControl?(.mouseMove(x: x, y: y, absolute: true))
     }
 
+    /// Buttons we believe are currently held on the host.
+    private var buttonsDown = Set<UInt8>()
+
     public func mouseButton(_ button: UInt8, pressed: Bool) {
-        sendControl?(.mouseButton(button: button, pressed: pressed))
+        if pressed {
+            // Self-heal a lost release: if we think this button is
+            // still down (our previous release datagram may have been
+            // lost — control rides unreliable QUIC datagrams), release
+            // it before pressing again so the host can't get stuck in
+            // drag mode.
+            if buttonsDown.contains(button) {
+                sendControl?(.mouseButton(button: button, pressed: false))
+            }
+            buttonsDown.insert(button)
+            sendControl?(.mouseButton(button: button, pressed: true))
+        } else {
+            buttonsDown.remove(button)
+            // Releases are idempotent on the host (releasing a released
+            // button is a no-op), so send redundantly — a single lost
+            // release datagram is exactly the "window sticks to the
+            // cursor" bug.
+            sendControl?(.mouseButton(button: button, pressed: false))
+            for delay in [0.05, 0.15] {
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                    // Skip if the button was pressed again in the
+                    // meantime — a late redundant release would end the
+                    // user's new drag.
+                    guard let self, !self.buttonsDown.contains(button) else { return }
+                    self.sendControl?(.mouseButton(button: button, pressed: false))
+                }
+            }
+        }
     }
 
     public func scroll(dx: Double, dy: Double) {
         sendControl?(.mouseScroll(dx: dx, dy: dy))
+    }
+
+    /// One-shot named host action (Mission Control, Launchpad,
+    /// AppSwitch). Rides the KeyEvent message; the host triggers on
+    /// press and ignores the release.
+    public func tapHostAction(_ name: String) {
+        sendControl?(.keyEvent(key: name, modifiers: 0, pressed: true))
+        sendControl?(.keyEvent(key: name, modifiers: 0, pressed: false))
     }
 
     // MARK: - Keyboard
@@ -178,4 +250,24 @@ public struct StylusSampleData {
     public var tiltY: Float
     public var predicted: Bool
     public var timestampUs: UInt64
+
+    /// Encode to flux-protocol's StylusSample wire format (bincode
+    /// fixed-shape, little-endian, 45 bytes). Verified byte-for-byte
+    /// against the Rust encoder. Note the phase rides as a u32
+    /// bincode *variant index* (Begin=0 … Cancel=3), not the 1-based
+    /// enum value used in this struct.
+    public func encodeWire() -> Data {
+        var d = Data(capacity: 45)
+        func le<T: FixedWidthInteger>(_ v: T) {
+            withUnsafeBytes(of: v.littleEndian) { d.append(contentsOf: $0) }
+        }
+        func f32(_ v: Float) { le(v.bitPattern) }
+        le(strokeId)
+        le(seq)
+        le(UInt32(max(1, phase)) - 1)
+        f32(x); f32(y); f32(pressure); f32(tiltX); f32(tiltY)
+        d.append(predicted ? 1 : 0)
+        le(timestampUs)
+        return d
+    }
 }

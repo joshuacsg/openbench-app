@@ -18,21 +18,107 @@ final class HostManager: ObservableObject {
     @Published var bitrateMbps: Double = 0
     @Published var statusMessage: String = "Idle"
 
+    /// Ports the flux-host subprocess actually bound, parsed from its
+    /// "pixel listen" / "pen listen" log lines (authoritative even if
+    /// the requested port was taken or 0 = ephemeral).
+    @Published var livePixelPort: UInt16?
+    @Published var livePenPort: UInt16?
+    /// The Mac's LAN IP (en0 preferred), for manual connects from the
+    /// viewer when Bonjour discovery doesn't reach it.
+    @Published var localIP: String?
+
     @Published var hasScreenRecordingPermission = false
 
     private var process: Process?
     private var outputPipe: Pipe?
 
-    // Configurable (future: SettingsView)
+    // MARK: - Quality / performance settings (persisted)
+
+    /// Frame rate the host captures and encodes at.
+    @Published var fps: UInt32 {
+        didSet { persistAndRestart(fps, key: Self.fpsKey, old: oldValue) }
+    }
+    /// Encoder target bitrate. The host's AIMD controller treats this
+    /// as the ceiling and adapts downward under congestion.
+    @Published var bitrateKbps: UInt32 {
+        didSet { persistAndRestart(bitrateKbps, key: Self.bitrateKey, old: oldValue) }
+    }
+    /// Cap on the longest edge of single-display streams, GPU-scaled by
+    /// ScreenCaptureKit on the host. 0 = native resolution.
+    @Published var maxDimension: UInt32 {
+        didSet { persistAndRestart(maxDimension, key: Self.maxDimensionKey, old: oldValue) }
+    }
+
+    private static let fpsKey = "host.fps"
+    private static let bitrateKey = "host.bitrateKbps"
+    private static let maxDimensionKey = "host.maxDimension"
+
+    // Fixed plumbing (not user-facing).
     private let pixelPort: UInt16 = 9000
     private let penPort: UInt16 = 9001
-    private let fps: UInt32 = 60
-    private let bitrateKbps: UInt32 = 10_000
     private let keyframeInterval: UInt32 = 60
-    private let maxPayload: UInt32 = 1100
+    // Upper cap only — flux-host derives the effective fragment payload
+    // live from the path MTU (~1395 on typical paths). 1100 would cap it
+    // and cost ~20% more packets.
+    private let maxPayload: UInt32 = 1400
 
     init() {
+        let defaults = UserDefaults.standard
+        let stored = { (key: String, fallback: UInt32) -> UInt32 in
+            let v = defaults.integer(forKey: key)
+            return v > 0 || defaults.object(forKey: key) != nil ? UInt32(max(0, v)) : fallback
+        }
+        // Lightweight defaults matching the viewer's: 1080p / 30 fps /
+        // 5 Mbps. Viewers override per-session via SetStreamSettings.
+        fps = stored(Self.fpsKey, 30)
+        bitrateKbps = stored(Self.bitrateKey, 5_000)
+        maxDimension = stored(Self.maxDimensionKey, 1920)
         checkPermissions()
+
+        // `open "FastPort Host.app" --args --autostart` starts the
+        // stream immediately on launch — lets a script / SSH session
+        // bring the host up without touching the menu bar. Only fires
+        // on fresh launches (macOS doesn't deliver --args to an
+        // already-running instance).
+        if ProcessInfo.processInfo.arguments.contains("--autostart") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                guard let self, !self.isRunning else { return }
+                guard self.hasScreenRecordingPermission else {
+                    self.statusMessage = "Autostart blocked: no screen recording permission"
+                    return
+                }
+                self.isRunning = true
+            }
+        }
+    }
+
+    /// Persist a changed setting and restart the stream (debounced) so
+    /// it takes effect — encoder/capture parameters are fixed at
+    /// subprocess launch.
+    private func persistAndRestart<T: Equatable>(_ value: T, key: String, old: T) {
+        guard value != old else { return }
+        UserDefaults.standard.set(value as? UInt32 ?? 0, forKey: key)
+        restartDebounced()
+    }
+
+    private var restartWork: DispatchWorkItem?
+
+    private func restartDebounced() {
+        guard isRunning else { return }
+        statusMessage = "Applying settings…"
+        restartWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.isRunning else { return }
+            self.stopSubprocess()
+            // Give the old process a beat to release the UDP ports.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+                guard let self, self.isRunning else { return }
+                self.start()
+            }
+        }
+        restartWork = work
+        // Debounce so dragging through picker options restarts once.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)
     }
 
     func checkPermissions() {
@@ -50,6 +136,7 @@ final class HostManager: ObservableObject {
 
     func start() {
         guard process == nil else { return }
+        intentionalStop = false
 
         // Locate the flux-host binary. Check common locations.
         let binary = findFluxHostBinary()
@@ -62,7 +149,7 @@ final class HostManager: ObservableObject {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: binary)
         proc.currentDirectoryURL = FileManager.default.temporaryDirectory
-        proc.arguments = [
+        var args = [
             "stream",
             "--pixel-bind", "0.0.0.0:\(pixelPort)",
             "--pen-bind", "0.0.0.0:\(penPort)",
@@ -72,6 +159,14 @@ final class HostManager: ObservableObject {
             "--keyframe-interval", "\(keyframeInterval)",
             "--max-payload", "\(maxPayload)",
         ]
+        if maxDimension > 0 {
+            args += ["--max-dimension", "\(maxDimension)"]
+        }
+        // Start on the main display (zero-copy single-display path)
+        // instead of the unified composite — viewers default to the
+        // first display anyway, and this avoids a restart at connect.
+        args += ["--display-id", "\(CGMainDisplayID())"]
+        proc.arguments = args
 
         // Merge stdout+stderr so we can parse stats lines.
         let pipe = Pipe()
@@ -93,11 +188,16 @@ final class HostManager: ObservableObject {
             print("[HostManager] process exited with status \(proc.terminationStatus)")
             Task { @MainActor [weak self] in
                 guard let self else { return }
+                // A newer subprocess already replaced this one
+                // (settings restart) — nothing to clean up.
+                if let current = self.process, current !== proc { return }
                 self.process = nil
                 self.outputPipe = nil
                 self.currentFps = 0
                 self.bitrateMbps = 0
-                if self.isRunning {
+                self.livePixelPort = nil
+                self.livePenPort = nil
+                if self.isRunning && !self.intentionalStop {
                     self.isRunning = false
                     self.statusMessage = "Stopped (exit \(proc.terminationStatus))"
                 }
@@ -110,6 +210,7 @@ final class HostManager: ObservableObject {
             try proc.run()
             process = proc
             statusMessage = "Starting…"
+            localIP = Self.localIPv4Address()
         } catch {
             print("[HostManager] launch failed: \(error)")
             statusMessage = "Failed: \(error.localizedDescription)"
@@ -118,6 +219,22 @@ final class HostManager: ObservableObject {
     }
 
     func stop() {
+        restartWork?.cancel()
+        stopSubprocess()
+        currentFps = 0
+        bitrateMbps = 0
+        livePixelPort = nil
+        livePenPort = nil
+        statusMessage = "Idle"
+    }
+
+    /// True while we are killing the subprocess on purpose (full stop
+    /// or settings restart) so the termination handler doesn't flip
+    /// `isRunning` off.
+    private var intentionalStop = false
+
+    private func stopSubprocess() {
+        intentionalStop = true
         guard let proc = process, proc.isRunning else {
             process = nil
             return
@@ -130,9 +247,6 @@ final class HostManager: ObservableObject {
         process = nil
         outputPipe?.fileHandleForReading.readabilityHandler = nil
         outputPipe = nil
-        currentFps = 0
-        bitrateMbps = 0
-        statusMessage = "Idle"
     }
 
     // MARK: - Output parsing
@@ -154,6 +268,9 @@ final class HostManager: ObservableObject {
                 statusMessage = "Client connected"
             } else if line.contains("pixel listen") {
                 statusMessage = "Listening"
+                livePixelPort = Self.parsePort(from: line)
+            } else if line.contains("pen") && line.contains("listen") {
+                livePenPort = Self.parsePort(from: line)
             } else if line.contains("bonjour") || line.contains("advertising") {
                 statusMessage = "Advertising"
             } else if line.contains("pixel send_datagram failed") {
@@ -162,6 +279,43 @@ final class HostManager: ObservableObject {
                 bitrateMbps = 0
             }
         }
+    }
+
+    /// Extract the port from a flux-host listen line, e.g.
+    /// `  pixel listen   : 0.0.0.0:9000`.
+    private static func parsePort(from line: String) -> UInt16? {
+        guard let match = line.range(of: #":(\d+)\s*$"#, options: .regularExpression) else {
+            return nil
+        }
+        return UInt16(line[match].dropFirst().trimmingCharacters(in: .whitespaces))
+    }
+
+    /// The Mac's primary LAN IPv4 address (en0 preferred, otherwise the
+    /// first non-loopback IPv4 interface).
+    private static func localIPv4Address() -> String? {
+        var ifaddr: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&ifaddr) == 0, let first = ifaddr else { return nil }
+        defer { freeifaddrs(ifaddr) }
+
+        var fallback: String?
+        for ptr in sequence(first: first, next: { $0.pointee.ifa_next }) {
+            let ifa = ptr.pointee
+            guard let sa = ifa.ifa_addr, sa.pointee.sa_family == sa_family_t(AF_INET),
+                  (ifa.ifa_flags & UInt32(IFF_LOOPBACK)) == 0,
+                  (ifa.ifa_flags & UInt32(IFF_UP)) != 0
+            else { continue }
+            var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            guard getnameinfo(
+                sa, socklen_t(sa.pointee.sa_len),
+                &host, socklen_t(host.count),
+                nil, 0, NI_NUMERICHOST
+            ) == 0 else { continue }
+            let address = String(cString: host)
+            let name = String(cString: ifa.ifa_name)
+            if name == "en0" { return address }
+            if fallback == nil { fallback = address }
+        }
+        return fallback
     }
 
     // MARK: - Binary discovery

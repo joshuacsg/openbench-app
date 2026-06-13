@@ -31,13 +31,17 @@
 //   and back-pressure guarantees.
 
 import Foundation
+import QuartzCore
 import Network
 import Combine
 import CoreVideo
+import CoreImage
+import ImageIO
 import Security
 import CryptoKit
-import CryptoKit
-import Security
+#if canImport(UIKit)
+import UIKit
+#endif
 
 @MainActor
 public final class StreamSession: ObservableObject {
@@ -52,6 +56,20 @@ public final class StreamSession: ObservableObject {
 
     /// Displays available on the host, populated from the Welcome message.
     @Published public var availableDisplays: [DisplayInfo] = []
+
+    /// Per-display JPEG snapshots from the host (display sidebar).
+    /// Populated on demand after sending .requestDisplayThumbnails.
+    @Published public var displayThumbnails: [UInt32: CGImage] = [:]
+
+    /// In-flight thumbnail chunk reassembly, keyed by display id.
+    /// Only touched from the receive queue.
+    private var thumbnailChunks: [UInt32: (generation: UInt32, total: Int, parts: [Int: String])] = [:]
+
+#if canImport(UIKit)
+    /// Low-rate thumbnail for the minimap (~5 fps).
+    @Published public var thumbnail: UIImage?
+    private var lastThumbnailTime: CFAbsoluteTime = 0
+#endif
 
     /// Non-nil while the trust-prompt sheet should be displayed.
     /// The caller (e.g. StreamView) presents TrustPromptView from this binding.
@@ -85,10 +103,71 @@ public final class StreamSession: ObservableObject {
     private let reassembler = FrameReassembler()
     private let decoder = HEVCDecoder()
 
+    // Pen flow: dedicated QUIC connection (RFC-0002 dual-flow) so
+    // 240 Hz stylus samples never queue behind pixel traffic.
+    private var penConnection: NWConnection?
+    private var penPort: UInt16 = 9001
+    private var penReady = false
+
     // Ping/Pong RTT tracking
     private var pingTimer: Timer?
     private var pendingPingNonce: UInt64?
     private var pendingPingTime: CFAbsoluteTime?
+
+    // Loss recovery: ask the host for a keyframe when the reassembler
+    // discards an incomplete frame, instead of showing corruption /
+    // freeze until the next interval keyframe. Rate-limited.
+    private var lastSeenDiscarded: UInt64 = 0
+
+    // Drop-to-live watchdog. The decode chain cannot skip P-frames, so
+    // when decoding falls behind arrival the backlog hides inside
+    // Network.framework and end-to-end delay grows without bound. We
+    // measure lag drift via host frame timestamps (constant clock
+    // offset cancels out against the session minimum) and, past the
+    // threshold, stop decoding, drain to live, and resync on a fresh
+    // keyframe.
+    private var lagBaselineUs: Int64?
+    private var skippingUntilKeyframe = false
+    private static let maxLagMs: Double = 500
+    /// Require this many CONSECUTIVE over-threshold frames before
+    /// dropping to live, so a single anomalous timestamp (e.g. a host
+    /// idle re-emit) can't trigger a spurious keyframe storm on an
+    /// otherwise-healthy stream. See RFC-0009 #1 (defense in depth).
+    private var consecutiveLaggedFrames = 0
+    private static let lagTripCount = 3
+    /// True once any connection has reached `.ready`; gates the
+    /// reconnect-only decode-pipeline reset. See RFC-0009 #2.
+    private var hasBecomeReady = false
+
+    /// Shared rate limit for ALL keyframe requests (loss detector +
+    /// lag watchdog) so concurrent triggers can't storm the host.
+    private var lastKeyframeRequestSent: CFAbsoluteTime = 0
+
+    /// Set by the UI when the minimap is visible; thumbnail generation
+    /// is skipped entirely otherwise (it was costing a full-resolution
+    /// CIContext render per tick even when hidden).
+    public var thumbnailEnabled = false
+
+    /// Decode-thread frame counter, drained by the 1 Hz fps timer —
+    /// avoids a MainActor hop per decoded frame.
+    private let decodeCountLock = NSLock()
+    private var decodedSinceLastTick: Int = 0
+    private var lastKnownCanvas: CGSize = .zero
+    private static let thumbnailCIContext = CIContext(options: [.useSoftwareRenderer: false])
+
+    // Stats accumulated on the receive queue and flushed to the
+    // @Published struct at ~2 Hz — a per-datagram MainActor hop (450/s
+    // at 5 Mbps) is real overhead on the path that must outrun the
+    // network.
+    private var pendingRecvBytes: UInt64 = 0
+    private var pendingRecvCount: UInt64 = 0
+    private var lastStatsFlush: CFAbsoluteTime = 0
+
+    // Periodic QualityFeedback for the host's AIMD bitrate controller.
+    private var feedbackTimer: Timer?
+    private var lastFeedbackBytes: UInt64 = 0
+    private var lastFeedbackDiscarded: UInt64 = 0
+    private var lastFeedbackFrames: UInt64 = 0
 
     // Auto-reconnect with exponential backoff
     private var reconnectTask: Task<Void, Never>?
@@ -109,40 +188,79 @@ public final class StreamSession: ObservableObject {
     /// Called when the host sends a Pong message in response to a Ping.
     public var onPong: ((UInt64) -> Void)?
 
+    /// Called once per connection with the resolved remote IP + pixel
+    /// port (Bonjour endpoints resolve at connect time). Used to
+    /// persist hosts for off-LAN reconnection.
+    public var onResolvedEndpoint: ((String, UInt16) -> Void)?
+
     // FPS tracking — count decoded frames per second.
     private var fpsFrameCount: Int = 0
     private var fpsTimer: Timer?
 
     public init() {
         decoder.onDecodedFrame = { [weak self] pb, ts in
-            // Infer canvas size from the first decoded frame so that
-            // InputCaptureView.mapToCanvas() can map touch coordinates
-            // correctly, even when flux-host doesn't send a Welcome message.
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                let w = CVPixelBufferGetWidth(pb)
-                let h = CVPixelBufferGetHeight(pb)
-                let frameSize = CGSize(width: w, height: h)
-                if w > 0 && h > 0 && self.canvasSize != frameSize {
-                    self.canvasSize = frameSize
+            guard let self else { return }
+            // Stay off the main actor on this per-frame path: count
+            // frames under a cheap lock (drained by the 1 Hz fps
+            // timer) and only hop for rare events.
+            self.decodeCountLock.lock()
+            self.decodedSinceLastTick += 1
+            self.decodeCountLock.unlock()
+
+            // Infer canvas size from the first decoded frame (and on
+            // change) so InputCaptureView.mapToCanvas() works even when
+            // the host doesn't send a Welcome.
+            let w = CVPixelBufferGetWidth(pb)
+            let h = CVPixelBufferGetHeight(pb)
+            let frameSize = CGSize(width: w, height: h)
+            if w > 0 && h > 0 && self.lastKnownCanvas != frameSize {
+                self.lastKnownCanvas = frameSize
+                Task { @MainActor [weak self] in
+                    self?.canvasSize = frameSize
                 }
-                self.stats.framesDecoded += 1
-                self.fpsFrameCount += 1
             }
-            self?.onDecodedFrame?(pb, ts)
+#if canImport(UIKit)
+            // Minimap thumbnail at ~5 fps, only while the minimap is
+            // visible. Render off-main with a cached CIContext at
+            // minimap scale (was: fresh CIContext + full-res render on
+            // the main thread, even when hidden).
+            if self.thumbnailEnabled {
+                let now = CFAbsoluteTimeGetCurrent()
+                if now - self.lastThumbnailTime > 0.2 {
+                    self.lastThumbnailTime = now
+                    if let image = Self.thumbnailFromPixelBuffer(pb) {
+                        Task { @MainActor [weak self] in
+                            self?.thumbnail = image
+                        }
+                    }
+                }
+            }
+#endif
+            self.onDecodedFrame?(pb, ts)
         }
     }
 
     private func startFpsCounter() {
         fpsTimer?.invalidate()
-        fpsFrameCount = 0
-        fpsTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+        decodeCountLock.lock()
+        decodedSinceLastTick = 0
+        decodeCountLock.unlock()
+        let timer = Timer(timeInterval: 1.0, repeats: true) { [weak self] timer in
+            guard let self else { timer.invalidate(); return }
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                self.stats.currentFps = Double(self.fpsFrameCount)
-                self.fpsFrameCount = 0
+                self.decodeCountLock.lock()
+                let n = self.decodedSinceLastTick
+                self.decodedSinceLastTick = 0
+                self.decodeCountLock.unlock()
+                self.stats.currentFps = Double(n)
+                self.stats.framesDecoded += UInt64(n)
             }
         }
+        // .common keeps stats/ping/feedback alive during UI tracking
+        // (drags/scrolls park .default-mode timers).
+        RunLoop.main.add(timer, forMode: .common)
+        fpsTimer = timer
     }
 
     private func stopFpsCounter() {
@@ -153,7 +271,8 @@ public final class StreamSession: ObservableObject {
 
     private func startPingLoop() {
         pingTimer?.invalidate()
-        pingTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+        let timer = Timer(timeInterval: 2.0, repeats: true) { [weak self] timer in
+            guard let self else { timer.invalidate(); return }
             Task { @MainActor [weak self] in
                 guard let self, self.state == .connected else { return }
                 let nonce = UInt64.random(in: 0...UInt64.max)
@@ -162,12 +281,140 @@ public final class StreamSession: ObservableObject {
                 self.sendControl(.ping(nonce: nonce))
             }
         }
+        RunLoop.main.add(timer, forMode: .common)
+        pingTimer = timer
     }
 
     private func stopPingLoop() {
         pingTimer?.invalidate()
         pingTimer = nil
         rttMs = nil
+    }
+
+    /// Decode a reassembled frame, unless we've fallen behind live —
+    /// then drain without decoding until the next keyframe so delay
+    /// stays bounded instead of compounding.
+    private func handleCompletedFrame(_ frame: FrameReassembler.ReassembledFrame) {
+        // Monotonic clock: CFAbsoluteTime is wall time and NTP steps
+        // would permanently poison the lag baseline (a backwards step
+        // ratchets the minimum down → every later frame reads as lagged
+        // → endless resync slideshow).
+        let nowUs = Int64(CACurrentMediaTime() * 1_000_000)
+        let offset = nowUs &- Int64(bitPattern: UInt64(frame.timestampUs))
+
+        // Track the session-minimum offset as the "zero lag" baseline;
+        // clock bases differ between host and viewer but the offset is
+        // constant, so growth above the minimum is pure queueing delay.
+        if let base = lagBaselineUs {
+            if offset < base { lagBaselineUs = offset }
+            // A wildly different offset (> 60 s either way) means the
+            // host's timestamp base changed (pipeline restart on the
+            // legacy path) — re-baseline rather than skip forever.
+            if abs(offset - base) > 60_000_000 { lagBaselineUs = offset }
+        } else {
+            lagBaselineUs = offset
+        }
+        let lagMs = Double(offset - (lagBaselineUs ?? offset)) / 1000.0
+
+        if skippingUntilKeyframe {
+            if frame.isKeyframe {
+                skippingUntilKeyframe = false
+                consecutiveLaggedFrames = 0
+                // If the backlog is drained and lag STILL exceeds the
+                // threshold, it's standing transport delay (path change,
+                // bufferbloat), not decoder queueing — re-anchor the
+                // baseline instead of resyncing forever.
+                if lagMs > Self.maxLagMs {
+                    lagBaselineUs = offset
+                    print("[StreamSession] re-anchored lag baseline (+\(Int(lagMs)) ms standing delay)")
+                } else {
+                    print("[StreamSession] resynced to live on keyframe (lag was \(Int(lagMs)) ms)")
+                }
+            } else {
+                return // draining to live — skip decode entirely
+            }
+        } else if lagMs > Self.maxLagMs {
+            // Only drop to live after several consecutive lagged frames:
+            // a lone bad timestamp shouldn't storm the host.
+            consecutiveLaggedFrames += 1
+            if consecutiveLaggedFrames >= Self.lagTripCount {
+                skippingUntilKeyframe = !frame.isKeyframe
+                print("[StreamSession] \(Int(lagMs)) ms behind live (\(consecutiveLaggedFrames)×) — dropping to live, requesting keyframe")
+                requestKeyframe()
+                if skippingUntilKeyframe { return }
+            }
+        } else {
+            consecutiveLaggedFrames = 0
+        }
+
+        do {
+            try decoder.decode(annexB: frame.data, timestampUs: frame.timestampUs)
+        } catch {
+            print("[StreamSession] decode error: \(error)")
+        }
+    }
+
+    /// If the reassembler discarded an incomplete frame since we last
+    /// looked, ask the host for a keyframe (recovery in ~1 RTT instead
+    /// of waiting out the keyframe interval). At most one request per
+    /// 250 ms.
+    private func requestKeyframeIfLossDetected() {
+        let discarded = reassembler.discarded
+        guard discarded > lastSeenDiscarded else { return }
+        lastSeenDiscarded = discarded
+        print("[StreamSession] frame lost (discards=\(discarded), FEC recoveries=\(reassembler.recovered)) — requesting keyframe")
+        requestKeyframe()
+    }
+
+    /// Single funnel (and rate limit) for keyframe requests from both
+    /// the loss detector and the lag watchdog.
+    private func requestKeyframe() {
+        let now = CFAbsoluteTimeGetCurrent()
+        guard now - lastKeyframeRequestSent >= 0.25 else { return }
+        lastKeyframeRequestSent = now
+        sendControl(.requestKeyframe)
+    }
+
+    private func startFeedbackLoop() {
+        feedbackTimer?.invalidate()
+        lastFeedbackBytes = stats.bytesReceived
+        lastFeedbackDiscarded = reassembler.discarded
+        lastFeedbackFrames = stats.framesReceived
+        let timer = Timer(timeInterval: 2.0, repeats: true) { [weak self] timer in
+            guard let self else { timer.invalidate(); return }
+            Task { @MainActor [weak self] in
+                guard let self, self.state == .connected else { return }
+                let bytes = self.stats.bytesReceived
+                let deliveredNow = self.reassembler.delivered
+                let discards = self.reassembler.discarded
+                let dBytes = bytes &- self.lastFeedbackBytes
+                let dDelivered = deliveredNow &- self.lastFeedbackFrames
+                let dDiscards = discards &- self.lastFeedbackDiscarded
+                self.lastFeedbackBytes = bytes
+                self.lastFeedbackFrames = deliveredNow
+                self.lastFeedbackDiscarded = discards
+
+                // True frame-loss ratio: lost / (lost + delivered).
+                // (The old datagram denominator diluted loss ~10-25×,
+                // leaving the host's AIMD controller effectively blind.)
+                let lossPct: Float = (dDiscards + dDelivered) > 0
+                    ? Float(dDiscards) / Float(dDiscards + dDelivered) * 100.0
+                    : 0
+                let bandwidthKbps = UInt32(dBytes * 8 / 2 / 1000)
+                self.sendControl(.qualityFeedback(
+                    rttMs: UInt32(self.rttMs ?? 0),
+                    lossPct: lossPct,
+                    bandwidthKbps: bandwidthKbps
+                ))
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        feedbackTimer = timer
+    }
+
+    private func stopFeedbackLoop() {
+        feedbackTimer?.invalidate()
+        feedbackTimer = nil
     }
 
     private func scheduleReconnect() {
@@ -188,18 +435,19 @@ public final class StreamSession: ObservableObject {
     }
 
     /// Connect to the host's pixel QUIC endpoint by hostname and port.
-    public func connect(host: String, port: UInt16) {
+    public func connect(host: String, port: UInt16, penPort: UInt16? = nil) {
         let endpoint = NWEndpoint.hostPort(
             host: .init(host),
             port: .init(integerLiteral: port)
         )
-        connect(endpoint: endpoint, hostName: host)
+        connect(endpoint: endpoint, hostName: host, penPort: penPort ?? (port &+ 1))
     }
 
     /// Connect to a Bonjour-discovered endpoint directly. Network.framework
     /// resolves the NWEndpoint.service address automatically.
-    public func connect(endpoint: NWEndpoint, hostName: String = "") {
+    public func connect(endpoint: NWEndpoint, hostName: String = "", penPort: UInt16 = 9001) {
         disconnect()
+        self.penPort = penPort
         state = .connecting
         connectingHost = hostName
         lastEndpoint = endpoint
@@ -232,21 +480,42 @@ public final class StreamSession: ObservableObject {
         let conn = NWConnection(to: endpoint, using: params)
         pixelConnection = conn
 
-        conn.stateUpdateHandler = { [weak self] newState in
+        conn.stateUpdateHandler = { [weak self, weak conn] newState in
             Task { @MainActor [weak self] in
+                guard let self, let conn, conn === self.pixelConnection else {
+                    // Stale callback from a replaced connection — a late
+                    // .failed/.cancelled here used to clobber the state
+                    // of the healthy new session and even tear it down
+                    // via a spurious reconnect.
+                    return
+                }
                 switch newState {
                 case .ready:
-                    self?.state = .connected
-                    self?.reconnectDelay = 0.5
-                    self?.reconnectTask = nil
-                    self?.startFpsCounter()
-                    self?.startPingLoop()
-                    self?.startReceiving()
+                    // On RECONNECT (not first connect), clear stale decode
+                    // + watchdog state. A surviving lagBaselineUs or
+                    // skippingUntilKeyframe from the dead connection would
+                    // drop every frame until a keyframe — which on a
+                    // static screen can be seconds away. See RFC-0009 #2.
+                    if self.hasBecomeReady {
+                        self.resetDecodePipeline()
+                    }
+                    self.hasBecomeReady = true
+                    self.state = .connected
+                    self.reconnectDelay = 0.5
+                    self.reconnectTask = nil
+                    self.startFpsCounter()
+                    self.startPingLoop()
+                    self.startFeedbackLoop()
+                    self.startReceiving()
+                    self.startPenConnection()
+                    if case .hostPort(let h, let p)? = conn.currentPath?.remoteEndpoint {
+                        self.onResolvedEndpoint?("\(h)", p.rawValue)
+                    }
                 case .failed(let error):
-                    self?.state = .failed(error.localizedDescription)
-                    self?.scheduleReconnect()
+                    self.state = .failed(error.localizedDescription)
+                    self.scheduleReconnect()
                 case .cancelled:
-                    self?.state = .disconnected
+                    self.state = .disconnected
                 default:
                     break
                 }
@@ -256,14 +525,152 @@ public final class StreamSession: ObservableObject {
         conn.start(queue: .global(qos: .userInteractive))
     }
 
+    /// Reset the decode pipeline (decoder + reassembler) so new frames
+    /// from a different display/resolution start clean. Call this before
+    /// sending SetActiveDisplay.
+    public func resetDecodePipeline() {
+        decoder.reset()
+        reassembler.reset()
+        lagBaselineUs = nil
+        skippingUntilKeyframe = false
+        consecutiveLaggedFrames = 0
+    }
+
     public func disconnect() {
         stopFpsCounter()
         stopPingLoop()
+        stopFeedbackLoop()
         reconnectTask?.cancel()
         reconnectTask = nil
         pixelConnection?.cancel()
         pixelConnection = nil
+        penConnection?.cancel()
+        penConnection = nil
+        penReady = false
         state = .disconnected
+    }
+
+    // MARK: - Pen flow (stylus)
+
+    /// Open the dedicated pen QUIC connection. Called when the pixel
+    /// connection is ready, so Bonjour endpoints are already resolved
+    /// to a concrete host we can pair with the pen port.
+    private func startPenConnection() {
+        penConnection?.cancel()
+        penReady = false
+
+        guard let path = pixelConnection?.currentPath,
+              case .hostPort(let host, _)? = path.remoteEndpoint else {
+            print("[StreamSession] pen: no resolved host yet — stylus falls back to mouse events")
+            return
+        }
+
+        let quicOptions = NWProtocolQUIC.Options(alpn: ["flux"])
+        quicOptions.isDatagram = true
+        quicOptions.maxDatagramFrameSize = 65535
+        sec_protocol_options_set_peer_authentication_required(
+            quicOptions.securityProtocolOptions,
+            false
+        )
+        let conn = NWConnection(
+            to: .hostPort(host: host, port: .init(integerLiteral: penPort)),
+            using: NWParameters(quic: quicOptions)
+        )
+        penConnection = conn
+        conn.stateUpdateHandler = { [weak self, weak conn] newState in
+            Task { @MainActor [weak self] in
+                guard let self, let conn, conn === self.penConnection else { return }
+                switch newState {
+                case .ready:
+                    self.penReady = true
+                    print("[StreamSession] pen flow connected (:\(self.penPort))")
+                case .failed, .cancelled:
+                    self.penReady = false
+                default:
+                    break
+                }
+            }
+        }
+        conn.start(queue: .global(qos: .userInteractive))
+    }
+
+    /// True when the active network path is cellular / metered, so the
+    /// UI can warn before sending a large clipboard blob.
+    public var isExpensivePath: Bool {
+        pixelConnection?.currentPath?.isExpensive ?? false
+    }
+
+    /// Send a large clipboard payload to the host over a dedicated
+    /// reliable QUIC stream (stream mode, not datagrams) to the pen
+    /// port. Opens, sends one framed blob, closes. `onComplete` is
+    /// invoked on the main actor with success/failure.
+    public func sendClipboardBlob(_ blob: ClipboardBlobData, onComplete: ((Bool) -> Void)? = nil) {
+        guard let path = pixelConnection?.currentPath,
+              case .hostPort(let host, _)? = path.remoteEndpoint else {
+            print("[StreamSession] clipboard: no resolved host — cannot send blob")
+            onComplete?(false)
+            return
+        }
+
+        let quicOptions = NWProtocolQUIC.Options(alpn: ["flux"])
+        quicOptions.isDatagram = false // reliable stream for the bulk blob
+        sec_protocol_options_set_peer_authentication_required(
+            quicOptions.securityProtocolOptions,
+            false
+        )
+        let conn = NWConnection(
+            to: .hostPort(host: host, port: .init(integerLiteral: penPort)),
+            using: NWParameters(quic: quicOptions)
+        )
+        let payload = blob.encodeWire()
+        conn.stateUpdateHandler = { newState in
+            switch newState {
+            case .ready:
+                // isComplete: true closes the send side (stream FIN) so
+                // the host's read_to_end completes.
+                conn.send(content: payload, isComplete: true,
+                          completion: .contentProcessed { error in
+                    let ok = (error == nil)
+                    if let error {
+                        print("[StreamSession] clipboard send error: \(error)")
+                    } else {
+                        print("[StreamSession] clipboard blob sent (\(payload.count) bytes)")
+                    }
+                    if let onComplete { DispatchQueue.main.async { onComplete(ok) } }
+                    // Let the FIN flush before tearing the connection down.
+                    DispatchQueue.global().asyncAfter(deadline: .now() + 0.4) {
+                        conn.cancel()
+                    }
+                })
+            case .failed(let e):
+                print("[StreamSession] clipboard connection failed: \(e)")
+                if let onComplete { DispatchQueue.main.async { onComplete(false) } }
+                conn.cancel()
+            default:
+                break
+            }
+        }
+        conn.start(queue: .global(qos: .userInitiated))
+    }
+
+    /// Ship one stylus sample on the pen flow; falls back to plain
+    /// mouse events (no pressure) when the pen connection is down so
+    /// the Pencil always draws something.
+    public func sendStylusSample(_ sample: StylusSampleData) {
+        if penReady, let conn = penConnection {
+            conn.send(content: sample.encodeWire(), completion: .idempotent)
+            return
+        }
+        guard !sample.predicted else { return }
+        switch sample.phase {
+        case 1:
+            sendControl(.mouseMove(x: Int32(sample.x), y: Int32(sample.y), absolute: true))
+            sendControl(.mouseButton(button: 0, pressed: true))
+        case 3, 4:
+            sendControl(.mouseButton(button: 0, pressed: false))
+        default:
+            sendControl(.mouseMove(x: Int32(sample.x), y: Int32(sample.y), absolute: true))
+        }
     }
 
     // MARK: - Control message send
@@ -315,7 +722,13 @@ public final class StreamSession: ObservableObject {
             if let error = error {
                 print("[StreamSession] receive error: \(error)")
                 Task { @MainActor [weak self] in
-                    self?.state = .failed(error.localizedDescription)
+                    guard let self, conn === self.pixelConnection else { return }
+                    self.state = .failed(error.localizedDescription)
+                    // The state handler doesn't always see a .failed
+                    // transition for receive-side errors; without this
+                    // the loop died and the stream froze with no
+                    // recovery.
+                    self.scheduleReconnect()
                 }
                 return
             }
@@ -329,24 +742,36 @@ public final class StreamSession: ObservableObject {
                 return
             }
 
-            Task { @MainActor [weak self] in
-                self?.stats.framesReceived += 1
-                self?.stats.bytesReceived += UInt64(data.count)
+            // Accumulate on the receive queue; flush to @Published at
+            // ~2 Hz instead of hopping to the main actor per datagram.
+            self.pendingRecvBytes &+= UInt64(data.count)
+            self.pendingRecvCount &+= 1
+            let nowAbs = CFAbsoluteTimeGetCurrent()
+            if nowAbs - self.lastStatsFlush >= 0.5 {
+                self.lastStatsFlush = nowAbs
+                let bytes = self.pendingRecvBytes
+                let count = self.pendingRecvCount
+                self.pendingRecvBytes = 0
+                self.pendingRecvCount = 0
+                Task { @MainActor [weak self] in
+                    self?.stats.framesReceived += count
+                    self?.stats.bytesReceived += bytes
+                }
             }
 
-            // flux-host sends raw VideoPacketHeader (19 bytes) + payload
-            // as QUIC datagrams. The header's first byte is the packet
-            // type (0x01 = video). Pass the FULL datagram to the
-            // reassembler — it expects the type byte at position 0.
-            //
-            // Future: when the host also sends control datagrams with
-            // type 0x02, we'll check data[0] here first and dispatch.
-            if let frame = self.reassembler.push(data) {
-                do {
-                    try self.decoder.decode(annexB: frame.data, timestampUs: frame.timestampUs)
-                } catch {
-                    print("[StreamSession] decode error: \(error)")
+            // Dispatch by type byte: 0x01 = video, 0x02 = control JSON.
+            let typeByte = data[data.startIndex]
+            if typeByte == Self.typeControl {
+                // Strip the type byte and handle the JSON payload.
+                let json = data.dropFirst()
+                self.handleIncomingControl(Data(json))
+            } else {
+                // Video fragment — pass full datagram (including type byte)
+                // to the reassembler.
+                if let frame = self.reassembler.push(data) {
+                    self.handleCompletedFrame(frame)
                 }
+                self.requestKeyframeIfLossDetected()
             }
 
             // Continue draining.
@@ -376,16 +801,21 @@ public final class StreamSession: ObservableObject {
         switch key {
         case "Welcome":
             guard let fields = value as? [String: Any] else { return }
-            let cw = (fields["canvas_width"]  as? CGFloat) ?? 0
-            let ch = (fields["canvas_height"] as? CGFloat) ?? 0
+            // canvas_width/height are inside the "layout" sub-object.
+            let layout = fields["layout"] as? [String: Any]
+            let cw = (layout?["canvas_width"]  as? CGFloat) ?? (fields["canvas_width"]  as? CGFloat) ?? 0
+            let ch = (layout?["canvas_height"] as? CGFloat) ?? (fields["canvas_height"] as? CGFloat) ?? 0
             Task { @MainActor [weak self] in
-                self?.canvasSize = CGSize(width: cw, height: ch)
+                if cw > 0 && ch > 0 {
+                    self?.canvasSize = CGSize(width: cw, height: ch)
+                }
                 if let displaysRaw = fields["available_displays"] as? [[String: Any]] {
                     self?.availableDisplays = displaysRaw.compactMap { d in
                         guard let id = d["id"] as? UInt32,
                               let w  = d["width"]  as? Int,
                               let h  = d["height"] as? Int else { return nil }
-                        return DisplayInfo(id: id, width: w, height: h)
+                        let name = d["name"] as? String ?? ""
+                        return DisplayInfo(id: id, name: name, width: w, height: h)
                     }
                 }
             }
@@ -405,10 +835,77 @@ public final class StreamSession: ObservableObject {
                 self?.onPong?(nonce)
             }
 
+        case "DisplayThumbnailChunk":
+            guard let fields = value as? [String: Any],
+                  let displayId  = fields["display_id"] as? UInt32,
+                  let generation = fields["generation"] as? UInt32,
+                  let seq        = fields["seq"] as? Int,
+                  let total      = fields["total"] as? Int,
+                  let dataB64    = fields["data_b64"] as? String,
+                  total > 0, seq >= 0, seq < total else { return }
+            handleThumbnailChunk(
+                displayId: displayId, generation: generation,
+                seq: seq, total: total, dataB64: dataB64
+            )
+
         default:
             print("[StreamSession] handleIncomingControl: unhandled message type '\(key)'")
         }
     }
+
+    /// Reassemble one display-thumbnail chunk; when all chunks of a
+    /// generation have arrived, decode the JPEG and publish it.
+    /// Datagrams are lossy — an incomplete generation just sits until
+    /// the next sweep supersedes it. Runs on the receive queue.
+    private func handleThumbnailChunk(
+        displayId: UInt32, generation: UInt32, seq: Int, total: Int, dataB64: String
+    ) {
+        var entry = thumbnailChunks[displayId]
+            ?? (generation: generation, total: total, parts: [:])
+        if entry.generation != generation || entry.total != total {
+            // Stale chunk from an older sweep, or a fresh sweep
+            // superseding a partial one — keep only the newest.
+            if generation < entry.generation { return }
+            entry = (generation: generation, total: total, parts: [:])
+        }
+        entry.parts[seq] = dataB64
+        if entry.parts.count < total {
+            thumbnailChunks[displayId] = entry
+            return
+        }
+        thumbnailChunks[displayId] = nil
+
+        let joined = (0..<total).compactMap { entry.parts[$0] }.joined()
+        guard let jpeg = Data(base64Encoded: joined),
+              let source = CGImageSourceCreateWithData(jpeg as CFData, nil),
+              let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+            print("[StreamSession] thumbnail decode failed for display \(displayId)")
+            return
+        }
+        Task { @MainActor [weak self] in
+            self?.displayThumbnails[displayId] = image
+        }
+    }
+
+#if canImport(UIKit)
+    // MARK: - Thumbnail generation
+
+    private static func thumbnailFromPixelBuffer(_ pb: CVPixelBuffer) -> UIImage? {
+        // Cached CIContext (creating one per call sets up a Metal
+        // pipeline each time) and render at minimap scale instead of
+        // full stream resolution (a 4K BGRA render is ~33 MB a tick).
+        var ciImage = CIImage(cvPixelBuffer: pb)
+        let targetWidth: CGFloat = 320
+        let scale = targetWidth / max(ciImage.extent.width, 1)
+        if scale < 1 {
+            ciImage = ciImage.transformed(by: .init(scaleX: scale, y: scale))
+        }
+        guard let cgImage = thumbnailCIContext.createCGImage(ciImage, from: ciImage.extent) else {
+            return nil
+        }
+        return UIImage(cgImage: cgImage)
+    }
+#endif
 
     // MARK: - TLS certificate helpers
 
@@ -448,11 +945,13 @@ public final class StreamSession: ObservableObject {
 /// A display available on the host, as reported in the Welcome message.
 public struct DisplayInfo: Identifiable, Equatable {
     public let id: UInt32
+    public let name: String
     public let width: Int
     public let height: Int
 
-    public init(id: UInt32, width: Int, height: Int) {
+    public init(id: UInt32, name: String = "", width: Int, height: Int) {
         self.id = id
+        self.name = name
         self.width = width
         self.height = height
     }
