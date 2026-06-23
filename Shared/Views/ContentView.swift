@@ -253,6 +253,12 @@ struct StreamView: View {
     /// Display sidebar visibility.
     @State private var showDisplaySidebar = false
 
+#if canImport(UIKit)
+    /// Drives the compact (iPhone) control-bar layout. `.compact` on
+    /// iPhone portrait (and iPad Slide Over); `.regular` on iPad/Mac.
+    @Environment(\.horizontalSizeClass) private var hSizeClass
+#endif
+
     /// Refresh sidebar thumbnails every 3 s while it's open (the host
     /// rate-limits sweeps to one per 2 s).
     private let thumbnailRefreshTimer =
@@ -308,125 +314,7 @@ struct StreamView: View {
         // Status bar + minimap as an overlay ON TOP of the ZStack,
         // so they receive touches above the UIView input capture.
         .overlay(alignment: .top) {
-            HStack(spacing: 8) {
-                if !session.availableDisplays.isEmpty {
-                    Button {
-                        withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
-                            showDisplaySidebar.toggle()
-                        }
-                        if showDisplaySidebar {
-                            session.sendControl(.requestDisplayThumbnails)
-                        }
-                    } label: {
-                        HStack(spacing: 4) {
-                            Image(systemName: "sidebar.leading")
-                                .font(.caption)
-                            Text("Displays")
-                                .font(.caption)
-                        }
-                        .foregroundStyle(.white.opacity(0.85))
-                    }
-                    .buttonStyle(GlassButtonStyle(isActive: showDisplaySidebar))
-                }
-
-                StreamSettingsView { fps, bitrateKbps, maxDimension in
-                    session.sendControl(.setStreamSettings(
-                        fps: fps,
-                        bitrateKbps: bitrateKbps,
-                        maxDimension: maxDimension
-                    ))
-                }
-
-                statusPill
-
-                Spacer()
-
-#if canImport(UIKit)
-                Button {
-                    inputManager.tapHostAction("SpaceLeft")
-                } label: {
-                    Image(systemName: "rectangle.lefthalf.inset.filled.arrow.left")
-                        .font(.caption)
-                        .foregroundStyle(.white.opacity(0.85))
-                }
-                .buttonStyle(GlassButtonStyle())
-
-                Button {
-                    inputManager.tapHostAction("SpaceRight")
-                } label: {
-                    Image(systemName: "rectangle.righthalf.inset.filled.arrow.right")
-                        .font(.caption)
-                        .foregroundStyle(.white.opacity(0.85))
-                }
-                .buttonStyle(GlassButtonStyle())
-
-                Button {
-                    inputManager.tapHostAction("MissionControl")
-                } label: {
-                    Image(systemName: "rectangle.3.group")
-                        .font(.caption)
-                        .foregroundStyle(.white.opacity(0.85))
-                }
-                .buttonStyle(GlassButtonStyle())
-
-                Button {
-                    inputManager.tapHostAction("Launchpad")
-                } label: {
-                    Image(systemName: "square.grid.3x3")
-                        .font(.caption)
-                        .foregroundStyle(.white.opacity(0.85))
-                }
-                .buttonStyle(GlassButtonStyle())
-
-                Button {
-                    trackpadMode.toggle()
-                } label: {
-                    Image(systemName: trackpadMode ? "cursorarrow.motionlines" : "hand.tap")
-                        .font(.caption)
-                        .foregroundStyle(.white.opacity(0.85))
-                }
-                .buttonStyle(GlassButtonStyle(isActive: trackpadMode))
-
-                Button {
-                    showKeyboard.toggle()
-                } label: {
-                    Image(systemName: "keyboard")
-                        .font(.caption)
-                        .foregroundStyle(.white.opacity(0.85))
-                }
-                .buttonStyle(GlassButtonStyle(isActive: showKeyboard))
-
-                Button {
-                    handlePasteToHost()
-                } label: {
-                    Image(systemName: "doc.on.clipboard")
-                        .font(.caption)
-                        .foregroundStyle(.white.opacity(0.85))
-                }
-                .buttonStyle(GlassButtonStyle())
-
-                Button {
-                    showMinimap.toggle()
-                    session.thumbnailEnabled = showMinimap
-                } label: {
-                    Image(systemName: "map")
-                        .font(.caption)
-                        .foregroundStyle(.white.opacity(0.85))
-                }
-                .buttonStyle(GlassButtonStyle(isActive: showMinimap))
-#endif
-
-                Button {
-                    session.disconnect()
-                    onDisconnect?()
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.title2)
-                        .symbolRenderingMode(.hierarchical)
-                        .foregroundStyle(.white.opacity(0.7))
-                }
-                .buttonStyle(GlassButtonStyle())
-            }
+            controlBar
             .padding()
             // No contentShape here: the HStack spans the full width
             // (Spacer), and a Rectangle shape would swallow taps in
@@ -696,6 +584,190 @@ struct StreamView: View {
 #else
         EmptyView()
 #endif
+    }
+
+    /// Top control bar. On regular width (iPad / Mac) it's a single row
+    /// with the host-action cluster pushed to the trailing edge. On
+    /// compact width (iPhone) that row overflows the screen, so we split
+    /// it into two — status / config on top, host actions below — keeping
+    /// every control on-screen and tappable instead of clipped off-edge.
+    @ViewBuilder private var controlBar: some View {
+#if canImport(UIKit)
+        if hSizeClass == .compact {
+            VStack(spacing: 8) {
+                HStack(spacing: 8) {
+                    displaysButton
+                    streamSettingsButton
+                    statusPill
+                    Spacer(minLength: 8)
+                    closeButton
+                }
+                // The host-action cluster has more buttons than fit
+                // across a phone, so scroll it horizontally instead of
+                // clipping off-edge. `.scrollClipDisabled` lets the
+                // GlassButton glow/shadow bleed past the row edge.
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        actionButtons
+                    }
+                    .padding(.horizontal, 2)
+                }
+                .scrollClipDisabled()
+            }
+        } else {
+            regularControlBar
+        }
+#else
+        regularControlBar
+#endif
+    }
+
+    /// Single-row layout: leading config cluster, flexible gap, then the
+    /// trailing host-action cluster and close button.
+    private var regularControlBar: some View {
+        HStack(spacing: 8) {
+            displaysButton
+            streamSettingsButton
+            statusPill
+            Spacer()
+            actionButtons
+            closeButton
+        }
+    }
+
+    /// Per-display sidebar toggle (only when the host exposes more than
+    /// the unified canvas). The text label collapses to the icon on
+    /// compact width to save room.
+    @ViewBuilder private var displaysButton: some View {
+        if !session.availableDisplays.isEmpty {
+            Button {
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+                    showDisplaySidebar.toggle()
+                }
+                if showDisplaySidebar {
+                    session.sendControl(.requestDisplayThumbnails)
+                }
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "sidebar.leading")
+                        .font(.caption)
+#if canImport(UIKit)
+                    if hSizeClass != .compact {
+                        Text("Displays").font(.caption)
+                    }
+#else
+                    Text("Displays").font(.caption)
+#endif
+                }
+                .foregroundStyle(.white.opacity(0.85))
+            }
+            .buttonStyle(GlassButtonStyle(isActive: showDisplaySidebar))
+        }
+    }
+
+    /// Stream quality menu (resolution / fps / bitrate).
+    private var streamSettingsButton: some View {
+        StreamSettingsView { fps, bitrateKbps, maxDimension in
+            session.sendControl(.setStreamSettings(
+                fps: fps,
+                bitrateKbps: bitrateKbps,
+                maxDimension: maxDimension
+            ))
+        }
+    }
+
+    /// Host-action cluster: space switch, Mission Control, Launchpad,
+    /// trackpad mode, soft keyboard, paste, minimap. UIKit-only — the Mac
+    /// viewer drives these through its real menu bar instead.
+    @ViewBuilder private var actionButtons: some View {
+#if canImport(UIKit)
+        Button {
+            inputManager.tapHostAction("SpaceLeft")
+        } label: {
+            Image(systemName: "rectangle.lefthalf.inset.filled.arrow.left")
+                .font(.caption)
+                .foregroundStyle(.white.opacity(0.85))
+        }
+        .buttonStyle(GlassButtonStyle())
+
+        Button {
+            inputManager.tapHostAction("SpaceRight")
+        } label: {
+            Image(systemName: "rectangle.righthalf.inset.filled.arrow.right")
+                .font(.caption)
+                .foregroundStyle(.white.opacity(0.85))
+        }
+        .buttonStyle(GlassButtonStyle())
+
+        Button {
+            inputManager.tapHostAction("MissionControl")
+        } label: {
+            Image(systemName: "rectangle.3.group")
+                .font(.caption)
+                .foregroundStyle(.white.opacity(0.85))
+        }
+        .buttonStyle(GlassButtonStyle())
+
+        Button {
+            inputManager.tapHostAction("Launchpad")
+        } label: {
+            Image(systemName: "square.grid.3x3")
+                .font(.caption)
+                .foregroundStyle(.white.opacity(0.85))
+        }
+        .buttonStyle(GlassButtonStyle())
+
+        Button {
+            trackpadMode.toggle()
+        } label: {
+            Image(systemName: trackpadMode ? "cursorarrow.motionlines" : "hand.tap")
+                .font(.caption)
+                .foregroundStyle(.white.opacity(0.85))
+        }
+        .buttonStyle(GlassButtonStyle(isActive: trackpadMode))
+
+        Button {
+            showKeyboard.toggle()
+        } label: {
+            Image(systemName: "keyboard")
+                .font(.caption)
+                .foregroundStyle(.white.opacity(0.85))
+        }
+        .buttonStyle(GlassButtonStyle(isActive: showKeyboard))
+
+        Button {
+            handlePasteToHost()
+        } label: {
+            Image(systemName: "doc.on.clipboard")
+                .font(.caption)
+                .foregroundStyle(.white.opacity(0.85))
+        }
+        .buttonStyle(GlassButtonStyle())
+
+        Button {
+            showMinimap.toggle()
+            session.thumbnailEnabled = showMinimap
+        } label: {
+            Image(systemName: "map")
+                .font(.caption)
+                .foregroundStyle(.white.opacity(0.85))
+        }
+        .buttonStyle(GlassButtonStyle(isActive: showMinimap))
+#endif
+    }
+
+    /// Disconnect / close the stream.
+    private var closeButton: some View {
+        Button {
+            session.disconnect()
+            onDisconnect?()
+        } label: {
+            Image(systemName: "xmark.circle.fill")
+                .font(.title2)
+                .symbolRenderingMode(.hierarchical)
+                .foregroundStyle(.white.opacity(0.7))
+        }
+        .buttonStyle(GlassButtonStyle())
     }
 
     private var statusPill: some View {
