@@ -429,6 +429,20 @@ struct StreamView: View {
                 )
             }
 
+            // Also save the host's Tailscale address (from Welcome) so the
+            // app can reconnect off-LAN (cellular) without manual entry —
+            // the local IPs above don't route there. Same ports, since the
+            // host binds 0.0.0.0.
+            let pixelPort = host.pixelPort
+            session.onTailscaleAddress = { tsIP in
+                SavedHostsStore.shared.add(
+                    name: hostName,
+                    host: tsIP,
+                    pixelPort: pixelPort,
+                    penPort: penPort
+                )
+            }
+
             // Local clipboard changes → send to host.
             clipboardManager.onClipboardChanged = { [weak inputManager] text in
                 inputManager?.syncClipboard(text)
@@ -443,6 +457,7 @@ struct StreamView: View {
             inputManager.sendControl = nil
             inputManager.sendStylus = nil
             session.onResolvedEndpoint = nil
+            session.onTailscaleAddress = nil
             clipboardManager.onClipboardChanged = nil
             session.onClipboardSync = nil
             session.disconnect()

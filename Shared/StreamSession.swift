@@ -225,6 +225,11 @@ public final class StreamSession: ObservableObject {
     /// persist hosts for off-LAN reconnection.
     public var onResolvedEndpoint: ((String, UInt16) -> Void)?
 
+    /// Called with the host's Tailscale IPv4 (from the Welcome message)
+    /// when the host reports one. Lets the app save a tailnet-reachable
+    /// address for off-LAN reconnect.
+    public var onTailscaleAddress: ((String) -> Void)?
+
     // FPS tracking — count decoded frames per second.
     private var fpsFrameCount: Int = 0
     private var fpsTimer: Timer?
@@ -921,6 +926,13 @@ public final class StreamSession: ObservableObject {
                     // null/absent max_dimension = native (0 in the picker).
                     UserDefaults.standard.set(
                         fields["max_dimension"] as? Int ?? 0, forKey: "stream.maxDimension")
+                }
+                // The host's Tailscale address (if Tailscale is up) — save
+                // it so the app can reconnect off-LAN (e.g. cellular)
+                // without manual entry. Bonjour can't reach the tailnet, so
+                // this Welcome field is the only way the viewer learns it.
+                if let tsIP = fields["host_tailscale_ip"] as? String, !tsIP.isEmpty {
+                    self?.onTailscaleAddress?(tsIP)
                 }
             }
 
