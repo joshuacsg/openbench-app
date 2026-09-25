@@ -26,7 +26,15 @@ public final class InputCaptureView: UIView, UIKeyInput, UIPointerInteractionDel
 
     /// The video canvas dimensions (from the host's Welcome layout).
     /// Used to map UIKit points → canvas pixel coordinates.
-    public var canvasSize: CGSize = .zero
+    public var canvasSize: CGSize = .zero {
+        didSet {
+            // A constrained surface centers its cursor inside the fitted
+            // canvas; redo that once the canvas size is first known.
+            guard constrainTrackpadToCanvas, oldValue == .zero, canvasSize != .zero else { return }
+            trackpadCursorPlacedInBounds = false
+            setNeedsLayout()
+        }
+    }
 
     // Track active pencil stroke for stroke_id assignment.
     private var currentStrokeId: UInt64 = 0
@@ -44,6 +52,17 @@ public final class InputCaptureView: UIView, UIKeyInput, UIPointerInteractionDel
     /// cursor overlay to render a local software cursor.
     /// Pass nil to hide the cursor (e.g. when direct touch begins).
     public var onPointerMoved: ((CGPoint?) -> Void)?
+
+    /// Same events as `onPointerMoved`, but in canvas pixel coordinates.
+    /// The external-monitor trackpad uses this to draw the cursor on a
+    /// different screen than the one being touched.
+    public var onCanvasPointerMoved: ((CGPoint?) -> Void)?
+
+    /// Trackpad mode only: keep the tracked cursor inside the
+    /// aspect-fitted canvas rect instead of the whole view. Set when
+    /// this view is a bare trackpad surface (no video under it), where
+    /// the letterbox area would map off the host display.
+    public var constrainTrackpadToCanvas = false
 
     // MARK: - Viewport zoom/pan state
 
@@ -97,9 +116,9 @@ public final class InputCaptureView: UIView, UIKeyInput, UIPointerInteractionDel
                     trackpadCursor = CGPoint(x: bounds.midX, y: bounds.midY)
                     trackpadCursorInitialized = true
                 }
-                onPointerMoved?(trackpadCursor)
+                reportPointer(trackpadCursor)
             } else {
-                onPointerMoved?(nil)
+                reportPointer(nil)
             }
         }
     }
@@ -153,6 +172,7 @@ public final class InputCaptureView: UIView, UIKeyInput, UIPointerInteractionDel
     // absolute move to the tracked position.
     private var trackpadCursor: CGPoint = .zero
     private var trackpadCursorInitialized = false
+    private var trackpadCursorPlacedInBounds = false
     private var trackpadLastPoint: CGPoint?
     private var trackpadGestureOrigin: CGPoint?
     private var trackpadTouchMoved = false
@@ -183,7 +203,7 @@ public final class InputCaptureView: UIView, UIKeyInput, UIPointerInteractionDel
                 directScrollActive = true
             }
             directScrollLastMidpoint = midpoint(of: directTouches)
-            onPointerMoved?(nil)
+            reportPointer(nil)
             return
         }
 
@@ -202,9 +222,9 @@ public final class InputCaptureView: UIView, UIKeyInput, UIPointerInteractionDel
         inputManager?.mouseButton(0, pressed: true)
         if touch.type == .indirectPointer {
             pointerButtonDown = true
-            onPointerMoved?(viewPt)
+            reportPointer(viewPt)
         } else {
-            onPointerMoved?(nil)
+            reportPointer(nil)
         }
     }
 
@@ -245,7 +265,7 @@ public final class InputCaptureView: UIView, UIKeyInput, UIPointerInteractionDel
         }
         let pos = mapToCanvas(viewPt)
         inputManager?.mouseMove(x: Int32(pos.x), y: Int32(pos.y))
-        if touch.type == .indirectPointer { onPointerMoved?(viewPt) }
+        if touch.type == .indirectPointer { reportPointer(viewPt) }
     }
 
     public override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
@@ -305,7 +325,7 @@ public final class InputCaptureView: UIView, UIKeyInput, UIPointerInteractionDel
         // Tap-and-a-half: a touch starting just after a tap becomes a
         // drag (button held while moving), like a Mac trackpad.
         dragLockArmed = (touch.timestamp - lastTapEndTime) < Self.tapAndAHalfWindow
-        onPointerMoved?(trackpadCursor)
+        reportPointer(trackpadCursor)
     }
 
     private func trackpadTouchMovedHandler(_ touch: UITouch) {
@@ -329,11 +349,12 @@ public final class InputCaptureView: UIView, UIKeyInput, UIPointerInteractionDel
         }
         guard trackpadTouchMoved else { return }
 
-        trackpadCursor.x = min(max(trackpadCursor.x + dx * Self.trackpadSensitivity, 0), bounds.width)
-        trackpadCursor.y = min(max(trackpadCursor.y + dy * Self.trackpadSensitivity, 0), bounds.height)
+        let range = trackpadCursorBounds
+        trackpadCursor.x = min(max(trackpadCursor.x + dx * Self.trackpadSensitivity, range.minX), range.maxX)
+        trackpadCursor.y = min(max(trackpadCursor.y + dy * Self.trackpadSensitivity, range.minY), range.maxY)
         let pos = mapToCanvas(trackpadCursor)
         inputManager?.mouseMove(x: Int32(pos.x), y: Int32(pos.y))
-        onPointerMoved?(trackpadCursor)
+        reportPointer(trackpadCursor)
     }
 
     private func trackpadTouchEnded(_ touch: UITouch) {
@@ -352,6 +373,39 @@ public final class InputCaptureView: UIView, UIKeyInput, UIPointerInteractionDel
         trackpadLastPoint = nil
         trackpadGestureOrigin = nil
         trackpadTouchMoved = false
+    }
+
+    /// Fan a pointer position (view coordinates, nil = hide) out to the
+    /// view-space and canvas-space observers.
+    private func reportPointer(_ viewPoint: CGPoint?) {
+        onPointerMoved?(viewPoint)
+        onCanvasPointerMoved?(viewPoint.map(mapToCanvas))
+    }
+
+    /// Region the trackpad cursor may travel: the whole view, or the
+    /// aspect-fitted canvas when `constrainTrackpadToCanvas` is set.
+    private var trackpadCursorBounds: CGRect {
+        guard constrainTrackpadToCanvas,
+              canvasSize.width > 0, canvasSize.height > 0,
+              bounds.width > 0, bounds.height > 0 else { return bounds }
+        let scale = min(bounds.width / canvasSize.width, bounds.height / canvasSize.height)
+        let w = canvasSize.width * scale
+        let h = canvasSize.height * scale
+        return CGRect(x: (bounds.width - w) / 2, y: (bounds.height - h) / 2, width: w, height: h)
+    }
+
+    public override func layoutSubviews() {
+        super.layoutSubviews()
+        // A constrained surface is usually created with trackpad mode
+        // already on, i.e. at zero bounds — which parked the cursor at
+        // the origin. Center it once real bounds arrive.
+        guard constrainTrackpadToCanvas, trackpadMode,
+              !trackpadCursorPlacedInBounds, bounds.width > 0, bounds.height > 0 else { return }
+        trackpadCursorPlacedInBounds = true
+        let range = trackpadCursorBounds
+        trackpadCursor = CGPoint(x: range.midX, y: range.midY)
+        trackpadCursorInitialized = true
+        reportPointer(trackpadCursor)
     }
 
     /// Midpoint of a set of touches in view coordinates.
@@ -382,7 +436,7 @@ public final class InputCaptureView: UIView, UIKeyInput, UIPointerInteractionDel
         let viewPt = gesture.location(in: self)
         let pos = mapToCanvas(viewPt)
         inputManager?.mouseMove(x: Int32(pos.x), y: Int32(pos.y))
-        onPointerMoved?(viewPt)
+        reportPointer(viewPt)
     }
 
     /// Two-finger trackpad scroll → MouseScroll.

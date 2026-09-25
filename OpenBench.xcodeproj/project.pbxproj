@@ -53,6 +53,9 @@
 		BB0000FA577047000000A003 /* ClipboardBlobSender.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000FA577047000000A001 /* ClipboardBlobSender.swift */; };
 		4A51599B65F9B27906A59E12 /* VirtualDisplay.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0680F5CFEA74BDE140F4051 /* VirtualDisplay.swift */; };
 		DCA747CD47B7D686717B58D4 /* VirtualDisplayManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3B13B9A1194BDA9357982944 /* VirtualDisplayManager.swift */; };
+		06C0E86A14C6CCB18ADE96AB /* ExternalDisplayController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 06D23CAEBAD61468B72E9069 /* ExternalDisplayController.swift */; };
+		4ACEDC158F27E7AA8DF0C3A7 /* ExternalDisplayControls.swift in Sources */ = {isa = PBXBuildFile; fileRef = 868EDEC831D31A64FD23AEF5 /* ExternalDisplayControls.swift */; };
+		5BD0AF16A61F36E537A65748 /* ExternalDisplayScene.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5B6A258BC08B633EBBBD7415 /* ExternalDisplayScene.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -92,6 +95,9 @@
 		B0680F5CFEA74BDE140F4051 /* VirtualDisplay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VirtualDisplay.swift; sourceTree = "<group>"; };
 		3B13B9A1194BDA9357982944 /* VirtualDisplayManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VirtualDisplayManager.swift; sourceTree = "<group>"; };
 		9393574903D9F46F93991D82 /* CGVirtualDisplayPrivate.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = CGVirtualDisplayPrivate.h; sourceTree = "<group>"; };
+		06D23CAEBAD61468B72E9069 /* ExternalDisplayController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExternalDisplayController.swift; sourceTree = "<group>"; };
+		868EDEC831D31A64FD23AEF5 /* ExternalDisplayControls.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExternalDisplayControls.swift; sourceTree = "<group>"; };
+		5B6A258BC08B633EBBBD7415 /* ExternalDisplayScene.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExternalDisplayScene.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -114,6 +120,9 @@
 				CC0000FA57704700000000D2 /* Assets.xcassets */,
 				C53E8A1FE81DC4BBAE0FF33E /* OpenBenchApp.swift */,
 				EE2E2F081BA30D040D08F35A /* TouchInputManager.swift */,
+				06D23CAEBAD61468B72E9069 /* ExternalDisplayController.swift */,
+				868EDEC831D31A64FD23AEF5 /* ExternalDisplayControls.swift */,
+				5B6A258BC08B633EBBBD7415 /* ExternalDisplayScene.swift */,
 			);
 			path = iOS;
 			sourceTree = "<group>";
@@ -316,6 +325,9 @@
 				FFA8E943BB04AA5A8D874E1E /* TouchInputManager.swift in Sources */,
 				A73096CD93F8C4CEB46027CC /* TrustPromptView.swift in Sources */,
 				9B190063017EC21972EB001E /* VideoDecoder.swift in Sources */,
+				06C0E86A14C6CCB18ADE96AB /* ExternalDisplayController.swift in Sources */,
+				4ACEDC158F27E7AA8DF0C3A7 /* ExternalDisplayControls.swift in Sources */,
+				5BD0AF16A61F36E537A65748 /* ExternalDisplayScene.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
