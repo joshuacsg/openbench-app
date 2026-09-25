@@ -5,9 +5,35 @@
 
 import SwiftUI
 
+/// Virtual display toggle + live status, shown in the main menu area.
+struct VirtualDisplayStatusView: View {
+    @ObservedObject var virtualDisplay: VirtualDisplayManager
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Toggle("Virtual Display", isOn: $virtualDisplay.isEnabled)
+                .disabled(!virtualDisplay.isSupported)
+                .toggleStyle(.switch)
+            if let summary = virtualDisplay.summary {
+                Text(summary)
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
+            if let message = virtualDisplay.statusMessage {
+                Text(message)
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+}
+
 /// Quality / performance settings section shown in the menu window.
 struct HostSettingsView: View {
     @ObservedObject var hostManager: HostManager
+    @ObservedObject var virtualDisplay: VirtualDisplayManager
 
     private static let resolutionOptions: [(label: String, value: UInt32)] = [
         ("Native", 0),
@@ -56,6 +82,28 @@ struct HostSettingsView: View {
 
             Toggle("Latency HUD (debug)", isOn: $hostManager.frameTimingEnabled)
             Text("Emits per-frame timing so the viewer HUD can show where host latency goes (capture → encode → send). Off in production. Restarts the stream.")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Divider()
+
+            Text("Virtual Display")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Picker("Size", selection: $virtualDisplay.preset) {
+                ForEach(VirtualDisplayPreset.allCases) { preset in
+                    Text(preset.label).tag(preset)
+                }
+            }
+            .disabled(!virtualDisplay.isSupported)
+
+            Toggle("HiDPI (2× pixels)", isOn: $virtualDisplay.hiDPI)
+                .toggleStyle(.checkbox)
+                .disabled(!virtualDisplay.isSupported)
+
+            Text("An extra 60 Hz desktop viewers can stream as an extended display. Changes recreate the display.")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -125,6 +173,8 @@ struct HostApp: App {
                     .disabled(!hostManager.hasScreenRecordingPermission)
                     .toggleStyle(.switch)
 
+                VirtualDisplayStatusView(virtualDisplay: hostManager.virtualDisplay)
+
                 Divider()
 
                 Button {
@@ -142,13 +192,17 @@ struct HostApp: App {
                 .buttonStyle(.plain)
 
                 if showSettings {
-                    HostSettingsView(hostManager: hostManager)
+                    HostSettingsView(
+                        hostManager: hostManager,
+                        virtualDisplay: hostManager.virtualDisplay
+                    )
                 }
 
                 Divider()
 
                 Button("Quit FastPort Host") {
                     hostManager.stop()
+                    hostManager.virtualDisplay.destroy()
                     NSApplication.shared.terminate(nil)
                 }
             }

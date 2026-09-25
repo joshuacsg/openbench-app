@@ -63,4 +63,5 @@ targets:
       INFOPLIST_KEY_NSLocalNetworkUsageDescription: "FastPort Host needs local network access to advertise and serve connections."
       INFOPLIST_KEY_NSScreenCaptureUsageDescription: "FastPort Host captures your screen to stream to connected viewers."
       INFOPLIST_KEY_NSAccessibilityUsageDescription: "FastPort Host needs Accessibility to inject mouse and keyboard input from connected viewers."
+      SWIFT_OBJC_BRIDGING_HEADER: Host/CGVirtualDisplayPrivate.h
       CODE_SIGN_STYLE: Automatic

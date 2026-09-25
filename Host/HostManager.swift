@@ -29,6 +29,9 @@ final class HostManager: ObservableObject {
 
     @Published var hasScreenRecordingPermission = false
 
+    /// Optional FastPort virtual display (extended desktop for viewers).
+    let virtualDisplay = VirtualDisplayManager()
+
     private var process: Process?
     private var outputPipe: Pipe?
 
@@ -98,6 +101,12 @@ final class HostManager: ObservableObject {
         // Off by default (production); key absent ⇒ false.
         frameTimingEnabled = defaults.bool(forKey: Self.frameTimingKey)
         checkPermissions()
+
+        // flux-host may enumerate displays only at launch, so a virtual
+        // display appearing / vanishing / resizing restarts the stream.
+        virtualDisplay.onDisplayChanged = { [weak self] in
+            self?.restartDebounced()
+        }
 
         // `open "FastPort Host.app" --args --autostart` starts the
         // stream immediately on launch — lets a script / SSH session
