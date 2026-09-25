@@ -230,6 +230,27 @@ public final class StreamSession: ObservableObject {
     /// address for off-LAN reconnect.
     public var onTailscaleAddress: ((String) -> Void)?
 
+    /// The concrete remote IP + pixel port of the current (or last)
+    /// connection. A second session to the same host (external-monitor
+    /// stream) dials this instead of re-resolving Bonjour, so both
+    /// sessions are guaranteed to land on the same host interface.
+    public private(set) var resolvedEndpoint: NWEndpoint?
+
+    /// When true, completed frames are dropped before decode (the
+    /// connection, control channel and stats stay live). Used while the
+    /// iPad is a trackpad for an external monitor and its own video is
+    /// hidden. Un-pausing resyncs on a fresh keyframe.
+    public var isDecodePaused = false {
+        didSet {
+            guard isDecodePaused != oldValue, !isDecodePaused else { return }
+            // P-frames were skipped while paused — wait for (and ask
+            // for) a keyframe instead of decoding against stale refs.
+            skippingUntilKeyframe = true
+            consecutiveLaggedFrames = 0
+            requestKeyframe()
+        }
+    }
+
     // FPS tracking — count decoded frames per second.
     private var fpsFrameCount: Int = 0
     private var fpsTimer: Timer?
@@ -387,6 +408,8 @@ public final class StreamSession: ObservableObject {
         // Correlate host timing for this frame (no-op unless the host is
         // emitting FrameTiming). frame.timestampUs IS the capture_us key.
         correlateHostTiming(captureUs: frame.timestampUs)
+
+        if isDecodePaused { return }
 
         // Monotonic clock: CFAbsoluteTime is wall time and NTP steps
         // would permanently poison the lag baseline (a backwards step
@@ -602,6 +625,7 @@ public final class StreamSession: ObservableObject {
                     self.startReceiving()
                     self.startPenConnection()
                     if case .hostPort(let h, let p)? = conn.currentPath?.remoteEndpoint {
+                        self.resolvedEndpoint = .hostPort(host: h, port: p)
                         self.onResolvedEndpoint?("\(h)", p.rawValue)
                     }
                 case .failed(let error):

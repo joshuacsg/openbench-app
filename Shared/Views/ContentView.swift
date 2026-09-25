@@ -257,6 +257,8 @@ struct StreamView: View {
     /// Drives the compact (iPhone) control-bar layout. `.compact` on
     /// iPhone portrait (and iPad Slide Over); `.regular` on iPad/Mac.
     @Environment(\.horizontalSizeClass) private var hSizeClass
+    /// External monitor coordinator (second stream + input routing).
+    @ObservedObject private var external = ExternalDisplayController.shared
 #endif
 
     /// Refresh sidebar thumbnails every 3 s while it's open (the host
@@ -268,48 +270,30 @@ struct StreamView: View {
         ZStack {
             Color(white: 0.08).ignoresSafeArea()
 
-            // Video + input capture share the same padded frame so
-            // coordinate mapping is accurate.
-            ZStack {
-                MetalVideoView(session: session)
-                    .clipShape(RoundedRectangle(cornerRadius: 12))
-                    .shadow(color: .black.opacity(0.5), radius: 16, y: 4)
-                    .scaleEffect(viewportScale)
-                    .offset(x: viewportOffset.x, y: viewportOffset.y)
-
 #if canImport(UIKit)
-                InputCaptureViewRepresentable(
+            if monitorDrivesInput {
+                // Trackpad mode for an external monitor: no local video
+                // (decode is paused), the surface drives the monitor.
+                ExternalTrackpadSurface(
+                    controller: external,
                     inputManager: inputManager,
-                    canvasSize: session.canvasSize,
-                    showKeyboard: showKeyboard,
-                    trackpadMode: trackpadMode,
-                    viewportScale: viewportScale,
-                    viewportOffset: viewportOffset,
-                    onPointerMoved: { pt in cursorPosition = pt },
-                    onViewportChanged: { scale, offset in
-                        viewportScale = scale
-                        viewportOffset = offset
-                    }
+                    showKeyboard: showKeyboard
                 )
-#elseif canImport(AppKit)
-                MacInputCaptureViewRepresentable(
-                    inputManager: inputManager,
-                    canvasSize: session.canvasSize
-                )
-#endif
-#if canImport(UIKit)
-                // Software cursor for trackpad/mouse
-                if let pos = cursorPosition {
-                    CursorCrosshair()
-                        .frame(width: 20, height: 20)
-                        .position(x: pos.x, y: pos.y)
-                        .allowsHitTesting(false)
-                }
-#endif
+                .padding(.horizontal, 8)
+                .padding(.top, 52)
+                .padding(.bottom, 8)
+            } else {
+                videoStack
+                    .padding(.horizontal, 8)
+                    .padding(.top, 52)
+                    .padding(.bottom, 8)
             }
-            .padding(.horizontal, 8)
-            .padding(.top, 52)
-            .padding(.bottom, 8)
+#else
+            videoStack
+                .padding(.horizontal, 8)
+                .padding(.top, 52)
+                .padding(.bottom, 8)
+#endif
         }
         // Status bar + minimap as an overlay ON TOP of the ZStack,
         // so they receive touches above the UIView input capture.
@@ -328,12 +312,12 @@ struct StreamView: View {
                 didAutoSelectDisplay = true
                 selectedDisplayID = first.id
                 session.resetDecodePipeline()
-                inputManager.setActiveDisplay(first.id)
+                session.sendControl(.setActiveDisplay(displayId: first.id))
             }
         }
 #if canImport(UIKit)
         .overlay {
-            if showMinimap {
+            if showMinimap && !monitorDrivesInput {
                 GeometryReader { geo in
                     MinimapView(
                         thumbnail: session.thumbnail,
@@ -385,7 +369,7 @@ struct StreamView: View {
                         onSelect: { displayID in
                             selectedDisplayID = displayID
                             session.resetDecodePipeline()
-                            inputManager.setActiveDisplay(displayID)
+                            session.sendControl(.setActiveDisplay(displayId: displayID))
                             closeDisplaySidebar()
                         },
                         onClose: { closeDisplaySidebar() }
@@ -401,9 +385,41 @@ struct StreamView: View {
                 session.sendControl(.requestDisplayThumbnails)
             }
         }
+#if canImport(UIKit)
+        .onChange(of: selectedDisplayID) { _, id in
+            external.iPadDisplayID = id
+        }
+        .onChange(of: monitorDrivesInput) { _, toMonitor in
+            // Release any button still held on the session losing
+            // input, and skip decoding the iPad's own (hidden) video
+            // while it's a trackpad.
+            let previous = toMonitor ? session : external.monitorSession
+            previous.sendControl(.mouseButton(button: 0, pressed: false))
+            previous.sendControl(.mouseButton(button: 1, pressed: false))
+            session.isDecodePaused = toMonitor
+            if !toMonitor { external.monitorCursor = nil }
+        }
+#endif
         .onAppear {
             session.connect(endpoint: host.endpoint, hostName: host.name, penPort: host.penPort)
 
+#if canImport(UIKit)
+            // Wire the InputManager's send callback to whichever session
+            // has input: the iPad's, or the external monitor's while the
+            // iPad is its trackpad.
+            attachExternalDisplay()
+            inputManager.sendControl = { [weak session, weak external] message in
+                guard let session else { return }
+                (external?.inputSession(primary: session) ?? session).sendControl(message)
+            }
+
+            // Apple Pencil → dedicated pen flow (pressure + tilt at
+            // 240 Hz, isolated from pixel traffic).
+            inputManager.sendStylus = { [weak session, weak external] sample in
+                guard let session else { return }
+                (external?.inputSession(primary: session) ?? session).sendStylusSample(sample)
+            }
+#else
             // Wire the InputManager's send callback to the session.
             inputManager.sendControl = { [weak session] message in
                 session?.sendControl(message)
@@ -414,6 +430,7 @@ struct StreamView: View {
             inputManager.sendStylus = { [weak session] sample in
                 session?.sendStylusSample(sample)
             }
+#endif
 
             // Remember successfully connected hosts (by resolved IP —
             // stable on Tailscale) so they appear in the Saved section
@@ -454,6 +471,10 @@ struct StreamView: View {
             }
         }
         .onDisappear {
+#if canImport(UIKit)
+            external.detachPrimary(session)
+            session.isDecodePaused = false
+#endif
             inputManager.sendControl = nil
             inputManager.sendStylus = nil
             session.onResolvedEndpoint = nil
@@ -503,6 +524,67 @@ struct StreamView: View {
         // space above it.
         .ignoresSafeArea(.keyboard)
     }
+
+    /// Video + input capture share the same padded frame so
+    /// coordinate mapping is accurate.
+    private var videoStack: some View {
+        ZStack {
+            MetalVideoView(session: session)
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+                .shadow(color: .black.opacity(0.5), radius: 16, y: 4)
+                .scaleEffect(viewportScale)
+                .offset(x: viewportOffset.x, y: viewportOffset.y)
+
+#if canImport(UIKit)
+            InputCaptureViewRepresentable(
+                inputManager: inputManager,
+                canvasSize: session.canvasSize,
+                showKeyboard: showKeyboard,
+                trackpadMode: trackpadMode,
+                viewportScale: viewportScale,
+                viewportOffset: viewportOffset,
+                onPointerMoved: { pt in cursorPosition = pt },
+                onViewportChanged: { scale, offset in
+                    viewportScale = scale
+                    viewportOffset = offset
+                }
+            )
+#elseif canImport(AppKit)
+            MacInputCaptureViewRepresentable(
+                inputManager: inputManager,
+                canvasSize: session.canvasSize
+            )
+#endif
+#if canImport(UIKit)
+            // Software cursor for trackpad/mouse
+            if let pos = cursorPosition {
+                CursorCrosshair()
+                    .frame(width: 20, height: 20)
+                    .position(x: pos.x, y: pos.y)
+                    .allowsHitTesting(false)
+            }
+#endif
+        }
+    }
+
+#if canImport(UIKit)
+    /// The iPad is a trackpad for the external monitor right now.
+    private var monitorDrivesInput: Bool { external.inputTargetsMonitor }
+
+    /// Session whose stats the status pill shows.
+    private var pillSession: StreamSession {
+        monitorDrivesInput ? external.monitorSession : session
+    }
+
+    /// Hand the iPad session to the external-monitor coordinator.
+    private func attachExternalDisplay() {
+        external.iPadDisplayID = selectedDisplayID
+        external.attachPrimary(session, hostName: host.name, endpoint: host.endpoint, penPort: host.penPort)
+    }
+#else
+    private var monitorDrivesInput: Bool { false }
+    private var pillSession: StreamSession { session }
+#endif
 
 #if canImport(UIKit)
     /// Inspect the iPad clipboard and STAGE it in the preview tray:
@@ -613,6 +695,7 @@ struct StreamView: View {
                 HStack(spacing: 8) {
                     displaysButton
                     streamSettingsButton
+                    externalDisplayButton
                     statusPill
                     Spacer(minLength: 8)
                     closeButton
@@ -643,6 +726,7 @@ struct StreamView: View {
         HStack(spacing: 8) {
             displaysButton
             streamSettingsButton
+            externalDisplayButton
             statusPill
             Spacer()
             actionButtons
@@ -654,7 +738,7 @@ struct StreamView: View {
     /// the unified canvas). The text label collapses to the icon on
     /// compact width to save room.
     @ViewBuilder private var displaysButton: some View {
-        if !session.availableDisplays.isEmpty {
+        if !session.availableDisplays.isEmpty && !monitorDrivesInput {
             Button {
                 withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
                     showDisplaySidebar.toggle()
@@ -689,6 +773,16 @@ struct StreamView: View {
                 maxDimension: maxDimension
             ))
         }
+    }
+
+    /// External monitor menu (display it shows + iPad mode), only while
+    /// a monitor is attached.
+    @ViewBuilder private var externalDisplayButton: some View {
+#if canImport(UIKit)
+        if external.isMonitorConnected {
+            ExternalDisplayMenu(controller: external)
+        }
+#endif
     }
 
     /// Host-action cluster: space switch, Mission Control, Launchpad,
@@ -732,14 +826,16 @@ struct StreamView: View {
         }
         .buttonStyle(GlassButtonStyle())
 
-        Button {
-            trackpadMode.toggle()
-        } label: {
-            Image(systemName: trackpadMode ? "cursorarrow.motionlines" : "hand.tap")
-                .font(.caption)
-                .foregroundStyle(.white.opacity(0.85))
+        if !monitorDrivesInput {
+            Button {
+                trackpadMode.toggle()
+            } label: {
+                Image(systemName: trackpadMode ? "cursorarrow.motionlines" : "hand.tap")
+                    .font(.caption)
+                    .foregroundStyle(.white.opacity(0.85))
+            }
+            .buttonStyle(GlassButtonStyle(isActive: trackpadMode))
         }
-        .buttonStyle(GlassButtonStyle(isActive: trackpadMode))
 
         Button {
             showKeyboard.toggle()
@@ -759,15 +855,17 @@ struct StreamView: View {
         }
         .buttonStyle(GlassButtonStyle())
 
-        Button {
-            showMinimap.toggle()
-            session.thumbnailEnabled = showMinimap
-        } label: {
-            Image(systemName: "map")
-                .font(.caption)
-                .foregroundStyle(.white.opacity(0.85))
+        if !monitorDrivesInput {
+            Button {
+                showMinimap.toggle()
+                session.thumbnailEnabled = showMinimap
+            } label: {
+                Image(systemName: "map")
+                    .font(.caption)
+                    .foregroundStyle(.white.opacity(0.85))
+            }
+            .buttonStyle(GlassButtonStyle(isActive: showMinimap))
         }
-        .buttonStyle(GlassButtonStyle(isActive: showMinimap))
 #endif
     }
 
@@ -808,10 +906,10 @@ struct StreamView: View {
     }
 
     private var statusColor: Color {
-        switch session.state {
+        switch pillSession.state {
         case .connected:
             // Color-code by RTT quality.
-            if let rtt = session.rttMs {
+            if let rtt = pillSession.rttMs {
                 if rtt < 30 { return .green }
                 if rtt < 80 { return .yellow }
                 return .orange
@@ -824,13 +922,13 @@ struct StreamView: View {
     }
 
     private var statusText: String {
-        switch session.state {
+        switch pillSession.state {
         case .connected:
-            let fps = Int(session.stats.currentFps)
-            let rtt = session.rttMs.map { " · \($0)ms" } ?? ""
+            let fps = Int(pillSession.stats.currentFps)
+            let rtt = pillSession.rttMs.map { " · \($0)ms" } ?? ""
             // Host pipeline delay (capture → encode done), shown only
             // when the host emits FrameTiming (FLUX_FRAME_TIMING set).
-            let pd = session.stats.hostPdMs.map { " · pd \(Int($0.rounded()))ms" } ?? ""
+            let pd = pillSession.stats.hostPdMs.map { " · pd \(Int($0.rounded()))ms" } ?? ""
             return "\(fps) fps\(rtt)\(pd)"
         case .connecting: return "Connecting…"
         case .disconnected: return "Disconnected"
@@ -884,16 +982,20 @@ struct InputCaptureViewRepresentable: UIViewRepresentable {
     var trackpadMode: Bool = false
     var viewportScale: CGFloat = 1.0
     var viewportOffset: CGPoint = .zero
+    var constrainTrackpadToCanvas: Bool = false
     var onPointerMoved: ((CGPoint?) -> Void)?
+    var onCanvasPointerMoved: ((CGPoint?) -> Void)?
     var onViewportChanged: ((CGFloat, CGPoint) -> Void)?
 
     func makeUIView(context: Context) -> InputCaptureView {
         let view = InputCaptureView()
         view.inputManager = inputManager
         view.canvasSize = canvasSize
+        view.constrainTrackpadToCanvas = constrainTrackpadToCanvas
         view.showKeyboard = showKeyboard
         view.trackpadMode = trackpadMode
         view.onPointerMoved = onPointerMoved
+        view.onCanvasPointerMoved = onCanvasPointerMoved
         view.onViewportChanged = onViewportChanged
         view.backgroundColor = .clear
         return view
@@ -903,8 +1005,10 @@ struct InputCaptureViewRepresentable: UIViewRepresentable {
         view.inputManager = inputManager
         view.canvasSize = canvasSize
         view.showKeyboard = showKeyboard
+        view.constrainTrackpadToCanvas = constrainTrackpadToCanvas
         view.trackpadMode = trackpadMode
         view.onPointerMoved = onPointerMoved
+        view.onCanvasPointerMoved = onCanvasPointerMoved
         view.onViewportChanged = onViewportChanged
         // Sync viewport from minimap slider → InputCaptureView.
         if abs(view.viewportScale - viewportScale) > 0.01
