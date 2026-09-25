@@ -240,6 +240,16 @@ public final class StreamSession: ObservableObject {
     /// connection, control channel and stats stay live). Used while the
     /// iPad is a trackpad for an external monitor and its own video is
     /// hidden. Un-pausing resyncs on a fresh keyframe.
+    /// Optional TLS server name (SNI) for this session's QUIC
+    /// connections. Network.framework pools QUIC connections from one
+    /// process to the same endpoint with identical parameters: a second
+    /// NWConnection silently becomes a stream on the FIRST session's
+    /// connection (the host sees one viewer; the second receives no
+    /// datagrams and its control messages act on the first session's
+    /// stream). A distinct server name forces a separate connection.
+    /// Set before connect(); nil keeps the default (no SNI change).
+    public var tlsServerName: String?
+
     public var isDecodePaused = false {
         didSet {
             guard isDecodePaused != oldValue, !isDecodePaused else { return }
@@ -590,6 +600,9 @@ public final class StreamSession: ObservableObject {
             quicOptions.securityProtocolOptions,
             false
         )
+        if let tlsServerName {
+            sec_protocol_options_set_tls_server_name(quicOptions.securityProtocolOptions, tlsServerName)
+        }
 
         let params = NWParameters(quic: quicOptions)
 
@@ -693,6 +706,9 @@ public final class StreamSession: ObservableObject {
             quicOptions.securityProtocolOptions,
             false
         )
+        if let tlsServerName {
+            sec_protocol_options_set_tls_server_name(quicOptions.securityProtocolOptions, tlsServerName)
+        }
         let conn = NWConnection(
             to: .hostPort(host: host, port: .init(integerLiteral: penPort)),
             using: NWParameters(quic: quicOptions)

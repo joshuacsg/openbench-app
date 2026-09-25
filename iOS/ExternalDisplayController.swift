@@ -18,8 +18,14 @@
 // iPad session is connected, so on any host the iPad's connection is
 // always the first one in. Hosts that predate multi-viewer support
 // accept the QUIC handshake and immediately close with "already
-// streaming"; two such quick rejections park the monitor in
-// `.unsupported` (no reconnect loop) until the user retries.
+// streaming". Network.framework does not reliably surface that close
+// (observed: the connection stays `.ready`, silently), so a liveness
+// watchdog also counts a connection that receives nothing — no
+// datagram, no pong — within a few seconds as a rejection. Either way
+// the monitor is parked in `.unsupported` (no reconnect loop) until the
+// user retries. A host at
+// its viewer cap closes with "viewer limit reached" → `.viewerLimit`,
+// parked the same way.
 
 import Foundation
 import Combine
@@ -54,6 +60,8 @@ final class ExternalDisplayController: ObservableObject {
         case streaming
         /// The host rejected a second concurrent viewer (older host).
         case unsupported
+        /// The host is at its concurrent-viewer cap (FLUX_MAX_VIEWERS).
+        case viewerLimit
         /// Transient failure — the session's own backoff is retrying.
         case failed(String)
     }
@@ -101,15 +109,43 @@ final class ExternalDisplayController: ObservableObject {
     /// A connection that closes this soon after the handshake without a
     /// Welcome is treated as a host-side rejection.
     private static let rejectWindow: CFAbsoluteTime = 3
+    /// A connected monitor session that has received no traffic by this
+    /// point was silently closed by the host.
+    private static let livenessTimeout: UInt64 = 5_000_000_000
+    private var livenessTask: Task<Void, Never>?
+    /// Monitor stream proved live (traffic arrived) since the last
+    /// attach / retry. Until then the iPad keeps showing its own video:
+    /// flipping it to a trackpad (and pausing its decode) for a stream
+    /// the host may silently refuse would drop the iPad's first keyframe
+    /// and leave its video black until the next one.
+    @Published private(set) var hasBeenLive = false
+    private var bytesAtConnect: UInt64 = 0
 
     private init() {
         iPadMode = IPadMode(rawValue: UserDefaults.standard.string(forKey: Self.modeKey) ?? "")
             ?? .trackpad
+        // Without a distinct SNI, Network.framework would fold this
+        // session into the iPad session's QUIC connection (same process,
+        // endpoint and parameters) instead of opening a second viewer.
+        monitorSession.tlsServerName = "fastport-monitor"
 
         // Views observe only the controller; surface the monitor
         // session's stats/state changes through it.
         monitorSession.objectWillChange
             .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
+
+        // Liveness: the first inbound traffic (datagrams or a pong) on a
+        // monitor connection. Stats flush at ~2 Hz, pongs every 2 s.
+        monitorSession.$stats
+            .combineLatest(monitorSession.$rttMs)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] stats, rtt in
+                guard let self, !self.hasBeenLive,
+                      self.status == .streaming,
+                      stats.bytesReceived > self.bytesAtConnect || rtt != nil else { return }
+                self.hasBeenLive = true
+            }
             .store(in: &cancellables)
 
         // receive(on:) delivers after the session's own state-change
@@ -137,10 +173,10 @@ final class ExternalDisplayController: ObservableObject {
     /// Falls back to the iPad session when the host can't serve a
     /// second stream.
     var inputTargetsMonitor: Bool {
-        guard isActive, iPadMode == .trackpad else { return false }
+        guard isActive, iPadMode == .trackpad, hasBeenLive else { return false }
         switch status {
         case .connecting, .streaming, .failed: return true
-        case .idle, .unsupported: return false
+        case .idle, .unsupported, .viewerLimit: return false
         }
     }
 
@@ -166,8 +202,9 @@ final class ExternalDisplayController: ObservableObject {
         primaryPenPort = penPort
         // New host connection: forget the last host's verdict/display.
         quickRejects = 0
+        hasBeenLive = false
         monitorDisplayID = nil
-        if status == .unsupported { status = .idle }
+        if isParked { status = .idle }
 
         primaryCancellables.removeAll()
         session.$state
@@ -221,9 +258,13 @@ final class ExternalDisplayController: ObservableObject {
         monitorSession.sendControl(.setActiveDisplay(displayId: id))
     }
 
+    /// The host turned the monitor stream away; stay down until retry.
+    var isParked: Bool { status == .unsupported || status == .viewerLimit }
+
     /// Clear an `.unsupported` / failed verdict and try again.
     func retry() {
         quickRejects = 0
+        hasBeenLive = false
         status = .idle
         monitorSession.disconnect()
         reconcile()
@@ -236,9 +277,11 @@ final class ExternalDisplayController: ObservableObject {
     private func reconcile() {
         guard isMonitorConnected,
               let primary, primary.state == .connected,
-              status != .unsupported else {
+              !isParked else {
+            livenessTask?.cancel()
+            hasBeenLive = false
             if monitorSession.state != .disconnected { monitorSession.disconnect() }
-            if status != .unsupported { status = .idle }
+            if !isParked { status = .idle }
             readyAt = nil
             return
         }
@@ -252,7 +295,7 @@ final class ExternalDisplayController: ObservableObject {
 
     private func monitorStateChanged(_ state: StreamSession.ConnectionState) {
         // Ignore stale deliveries after we've already stood down.
-        guard status != .unsupported, isActive,
+        guard !isParked, isActive,
               monitorSession.state != .disconnected else { return }
         switch state {
         case .connecting:
@@ -260,11 +303,13 @@ final class ExternalDisplayController: ObservableObject {
         case .connected:
             readyAt = CFAbsoluteTimeGetCurrent()
             sawWelcome = false
+            bytesAtConnect = monitorSession.stats.bytesReceived
             // Each connection starts on the host's default display —
             // re-apply our choice once this connection's Welcome lands.
             needsDisplayApply = true
             applyStreamSettings()
             status = .streaming
+            startLivenessWatchdog()
         case .failed(let message):
             handleMonitorFailure(message)
         case .disconnected:
@@ -272,8 +317,39 @@ final class ExternalDisplayController: ObservableObject {
         }
     }
 
+    /// Pings go out every 2 s and hosts send Welcome + frames right
+    /// away, so a live connection always has inbound traffic by now.
+    private func startLivenessWatchdog() {
+        livenessTask?.cancel()
+        let bytesAtStart = monitorSession.stats.bytesReceived
+        livenessTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: Self.livenessTimeout)
+            guard let self, !Task.isCancelled,
+                  self.status == .streaming,
+                  self.monitorSession.state == .connected,
+                  self.monitorSession.stats.bytesReceived == bytesAtStart,
+                  self.monitorSession.rttMs == nil,
+                  !self.sawWelcome, !self.hasBeenLive else { return }
+            print("[ExternalDisplay] monitor connection silent for 5 s — host closed it (single-viewer host?)")
+            self.park(.unsupported)
+        }
+    }
+
+    /// Stand the monitor down after a host rejection. The session's own
+    /// backoff loop is stopped; the iPad session is a separate
+    /// connection and is untouched.
+    private func park(_ verdict: MonitorStatus) {
+        livenessTask?.cancel()
+        hasBeenLive = false
+        status = verdict
+        monitorCursor = nil
+        readyAt = nil
+        monitorSession.disconnect()
+    }
+
     private func handleMonitorFailure(_ message: String) {
-        let explicit = message.localizedCaseInsensitiveContains("already streaming")
+        let alreadyStreaming = message.localizedCaseInsensitiveContains("already streaming")
+        let atViewerLimit = message.localizedCaseInsensitiveContains("viewer limit")
         // Only judge connections that actually completed the handshake;
         // a duplicate .failed for the same connection (receive error +
         // state handler) arrives with readyAt already cleared.
@@ -283,13 +359,9 @@ final class ExternalDisplayController: ObservableObject {
         }
         readyAt = nil
 
-        if explicit || quickRejects >= 2 {
-            print("[ExternalDisplay] host rejected a second viewer (\(message)) — monitor stream parked")
-            status = .unsupported
-            monitorCursor = nil
-            // Stop the session's own backoff loop; the iPad session is
-            // a separate connection and is untouched.
-            monitorSession.disconnect()
+        if atViewerLimit || alreadyStreaming || quickRejects >= 2 {
+            print("[ExternalDisplay] host rejected the monitor stream (\(message)) — parked")
+            park(atViewerLimit ? .viewerLimit : .unsupported)
         } else {
             status = .failed(message)
         }

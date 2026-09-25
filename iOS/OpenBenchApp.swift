@@ -14,11 +14,21 @@ struct OpenBenchApp: App {
     }
 }
 
-/// Claims external monitors: a connecting non-interactive external-
-/// display session gets ExternalDisplaySceneDelegate (our own content)
-/// instead of the system mirror. Every other role keeps SwiftUI's
-/// default configuration.
+/// Claims external monitors: starts ExternalDisplaySceneMonitor, and
+/// hands a connecting non-interactive external-display session
+/// ExternalDisplaySceneDelegate when UIKit asks. Every other role keeps
+/// SwiftUI's default configuration.
 final class FastPortAppDelegate: NSObject, UIApplicationDelegate {
+    func application(
+        _ application: UIApplication,
+        didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
+    ) -> Bool {
+        // Attaches our window to external-display scenes via UIScene
+        // notifications (see ExternalDisplayScene.swift for why).
+        ExternalDisplaySceneMonitor.shared.start()
+        return true
+    }
+
     func application(
         _ application: UIApplication,
         configurationForConnecting connectingSceneSession: UISceneSession,
@@ -29,6 +39,10 @@ final class FastPortAppDelegate: NSObject, UIApplicationDelegate {
             config.delegateClass = ExternalDisplaySceneDelegate.self
             return config
         }
-        return connectingSceneSession.configuration
+        // A fresh config with no delegateClass lets SwiftUI install its
+        // own scene delegate. (Returning `connectingSceneSession
+        // .configuration` hands SwiftUI its own delegate class back, and
+        // it then wraps itself → infinite responds(to:) recursion.)
+        return UISceneConfiguration(name: nil, sessionRole: connectingSceneSession.role)
     }
 }

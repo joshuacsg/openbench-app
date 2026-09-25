@@ -26,7 +26,15 @@ public final class InputCaptureView: UIView, UIKeyInput, UIPointerInteractionDel
 
     /// The video canvas dimensions (from the host's Welcome layout).
     /// Used to map UIKit points → canvas pixel coordinates.
-    public var canvasSize: CGSize = .zero
+    public var canvasSize: CGSize = .zero {
+        didSet {
+            // A constrained surface centers its cursor inside the fitted
+            // canvas; redo that once the canvas size is first known.
+            guard constrainTrackpadToCanvas, oldValue == .zero, canvasSize != .zero else { return }
+            trackpadCursorPlacedInBounds = false
+            setNeedsLayout()
+        }
+    }
 
     // Track active pencil stroke for stroke_id assignment.
     private var currentStrokeId: UInt64 = 0

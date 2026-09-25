@@ -17,7 +17,7 @@ struct ExternalDisplayMenu: View {
         Menu {
             Section {
                 Text(statusLine)
-                if controller.status == .unsupported || isFailed {
+                if controller.isParked || isFailed {
                     Button {
                         controller.retry()
                     } label: {
@@ -26,7 +26,7 @@ struct ExternalDisplayMenu: View {
                 }
             }
 
-            if !controller.pickerDisplays.isEmpty && controller.status != .unsupported {
+            if !controller.pickerDisplays.isEmpty && !controller.isParked {
                 Section("Monitor shows") {
                     ForEach(controller.pickerDisplays) { display in
                         Button {
@@ -87,6 +87,7 @@ struct ExternalDisplayMenu: View {
             return "External display · \(fps) fps"
         case .failed: return "External display · reconnecting…"
         case .unsupported: return "Host doesn't support a second stream yet"
+        case .viewerLimit: return "Host viewer limit reached"
         }
     }
 
@@ -94,7 +95,7 @@ struct ExternalDisplayMenu: View {
         switch controller.status {
         case .streaming: return .green
         case .connecting, .failed: return .yellow
-        case .unsupported: return .red
+        case .unsupported, .viewerLimit: return .red
         case .idle: return .gray
         }
     }
