@@ -2,8 +2,9 @@
 // FastPort virtual display.
 //
 // Independent of streaming: the display exists whenever it is enabled.
-// Any create / destroy / resize fires `onDisplayChanged` so HostManager
-// can restart flux-host (which may enumerate displays only at launch).
+// Any create / destroy / resize fires `onDisplayChanged`. HostManager
+// does NOT restart flux-host on it: multi-viewer flux-host enumerates
+// displays per connection, and a restart would drop every live viewer.
 
 import Foundation
 import CoreGraphics

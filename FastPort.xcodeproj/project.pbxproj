@@ -51,6 +51,8 @@
 		DD0000FA57704700000000E3 /* SavedHosts.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD0000FA57704700000000E1 /* SavedHosts.swift */; };
 		BB0000FA57704700000000F2 /* ClipboardBlobSender.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000FA57704700000000F1 /* ClipboardBlobSender.swift */; };
 		BB0000FA57704700000000F3 /* ClipboardBlobSender.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000FA57704700000000F1 /* ClipboardBlobSender.swift */; };
+		E6C16C38B30D7D03328B0DE1 /* VirtualDisplay.swift in Sources */ = {isa = PBXBuildFile; fileRef = C818CBFD122986257DB7E0B4 /* VirtualDisplay.swift */; };
+		B1F374EE3369E4FEDD5DAB6E /* VirtualDisplayManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 094B4563336F21AB0BA2096A /* VirtualDisplayManager.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -87,6 +89,9 @@
 		BB0000FA57704700000000D1 /* DisplaySidebarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DisplaySidebarView.swift; sourceTree = "<group>"; };
 		DD0000FA57704700000000E1 /* SavedHosts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SavedHosts.swift; sourceTree = "<group>"; };
 		BB0000FA57704700000000F1 /* ClipboardBlobSender.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipboardBlobSender.swift; sourceTree = "<group>"; };
+		C818CBFD122986257DB7E0B4 /* VirtualDisplay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VirtualDisplay.swift; sourceTree = "<group>"; };
+		094B4563336F21AB0BA2096A /* VirtualDisplayManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VirtualDisplayManager.swift; sourceTree = "<group>"; };
+		3CBD0EC5B75E07530DA24D10 /* CGVirtualDisplayPrivate.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = CGVirtualDisplayPrivate.h; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -173,6 +178,9 @@
 				809891850160D14047DEEC94 /* HostApp.swift */,
 				46175A35F34B87EBA3CAA3A1 /* HostManager.swift */,
 				98BC4B06800EF5D7458C2A67 /* PermissionChecker.swift */,
+				C818CBFD122986257DB7E0B4 /* VirtualDisplay.swift */,
+				094B4563336F21AB0BA2096A /* VirtualDisplayManager.swift */,
+				3CBD0EC5B75E07530DA24D10 /* CGVirtualDisplayPrivate.h */,
 			);
 			path = Host;
 			sourceTree = "<group>";
@@ -345,6 +353,8 @@
 				02C944C12FA10267879B58BA /* HostApp.swift in Sources */,
 				9E777745F882F045D3568AB3 /* HostManager.swift in Sources */,
 				7DBEF88FF97778B490023F36 /* PermissionChecker.swift in Sources */,
+				E6C16C38B30D7D03328B0DE1 /* VirtualDisplay.swift in Sources */,
+				B1F374EE3369E4FEDD5DAB6E /* VirtualDisplayManager.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -544,6 +554,7 @@
 				INFOPLIST_KEY_NSAccessibilityUsageDescription = "FastPort Host needs Accessibility to inject mouse and keyboard input from connected viewers.";
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "FastPort Host needs local network access to advertise and serve connections.";
 				INFOPLIST_KEY_NSScreenCaptureUsageDescription = "FastPort Host captures your screen to stream to connected viewers.";
+				SWIFT_OBJC_BRIDGING_HEADER = Host/CGVirtualDisplayPrivate.h;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
@@ -590,6 +601,7 @@
 				INFOPLIST_KEY_NSAccessibilityUsageDescription = "FastPort Host needs Accessibility to inject mouse and keyboard input from connected viewers.";
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "FastPort Host needs local network access to advertise and serve connections.";
 				INFOPLIST_KEY_NSScreenCaptureUsageDescription = "FastPort Host captures your screen to stream to connected viewers.";
+				SWIFT_OBJC_BRIDGING_HEADER = Host/CGVirtualDisplayPrivate.h;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
