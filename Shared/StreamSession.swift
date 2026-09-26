@@ -195,6 +195,18 @@ public final class StreamSession: ObservableObject {
     private var pendingRecvCount: UInt64 = 0
     private var lastStatsFlush: CFAbsoluteTime = 0
 
+    /// Wall time of the last datagram on the pixel connection (written
+    /// on the receive queue); lets the foreground check spot a zombie.
+    private var lastReceiveTime: CFAbsoluteTime = 0
+
+    /// Guards the decoder + reassembler + watchdog state, which the
+    /// receive queue drives and resetDecodePipeline() (main) tears down.
+    private let pipelineLock = NSLock()
+
+#if canImport(UIKit)
+    private var foregroundObserver: NSObjectProtocol?
+#endif
+
     // Periodic QualityFeedback for the host's AIMD bitrate controller.
     private var feedbackTimer: Timer?
     private var lastFeedbackBytes: UInt64 = 0
@@ -255,8 +267,10 @@ public final class StreamSession: ObservableObject {
             guard isDecodePaused != oldValue, !isDecodePaused else { return }
             // P-frames were skipped while paused — wait for (and ask
             // for) a keyframe instead of decoding against stale refs.
+            pipelineLock.lock()
             skippingUntilKeyframe = true
             consecutiveLaggedFrames = 0
+            pipelineLock.unlock()
             requestKeyframe()
         }
     }
@@ -266,6 +280,14 @@ public final class StreamSession: ObservableObject {
     private var fpsTimer: Timer?
 
     public init() {
+#if canImport(UIKit)
+        foregroundObserver = NotificationCenter.default.addObserver(
+            forName: UIApplication.willEnterForegroundNotification,
+            object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.handleForeground() }
+        }
+#endif
         decoder.onDecodedFrame = { [weak self] pb, ts in
             guard let self else { return }
             // Stay off the main actor on this per-frame path: count
@@ -306,6 +328,14 @@ public final class StreamSession: ObservableObject {
 #endif
             self.onDecodedFrame?(pb, ts)
         }
+    }
+
+    deinit {
+#if canImport(UIKit)
+        if let foregroundObserver {
+            NotificationCenter.default.removeObserver(foregroundObserver)
+        }
+#endif
     }
 
     private func startFpsCounter() {
@@ -546,17 +576,50 @@ public final class StreamSession: ObservableObject {
     private func scheduleReconnect() {
         reconnectTask?.cancel()
         let delay = reconnectDelay
-        let endpoint = lastEndpoint
-        let hostName = lastHostName
         reconnectDelay = min(reconnectDelay * 2, 8.0) // cap at 8s
 
         reconnectTask = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
             guard let self, !Task.isCancelled else { return }
             guard case .failed = self.state else { return }
-            if let endpoint {
-                self.connect(endpoint: endpoint, hostName: hostName)
+            self.reconnect()
+        }
+    }
+
+    /// Redial the last endpoint with the same pen port and server name,
+    /// keeping the current backoff (connect() from the UI resets it).
+    private func reconnect() {
+        guard let endpoint = lastEndpoint else { return }
+        connect(endpoint: endpoint, hostName: lastHostName, penPort: penPort, isRetry: true)
+    }
+
+    /// Called when the app returns to the foreground. iOS suspends the
+    /// app in the background, so the QUIC connection is usually dead by
+    /// now — the host drops it after its idle timeout, while this side
+    /// may still believe it's connected (or be parked mid-backoff).
+    /// Redial at once instead of waiting out a stale backoff or our own
+    /// much longer idle timeout.
+    private func handleForeground() {
+        guard lastEndpoint != nil else { return }
+        switch state {
+        case .failed, .connecting:
+            reconnectTask?.cancel()
+            reconnectDelay = 0.5
+            reconnect()
+        case .connected:
+            // A live stream delivers datagrams (frames, pongs) within a
+            // couple of seconds; silence means a zombie connection.
+            let foregroundedAt = CFAbsoluteTimeGetCurrent()
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                guard let self, self.state == .connected,
+                      self.lastReceiveTime < foregroundedAt else { return }
+                print("[StreamSession] no traffic after foreground — reconnecting")
+                self.reconnectDelay = 0.5
+                self.reconnect()
             }
+        case .disconnected:
+            break
         }
     }
 
@@ -572,13 +635,18 @@ public final class StreamSession: ObservableObject {
     /// Connect to a Bonjour-discovered endpoint directly. Network.framework
     /// resolves the NWEndpoint.service address automatically.
     public func connect(endpoint: NWEndpoint, hostName: String = "", penPort: UInt16 = 9001) {
+        connect(endpoint: endpoint, hostName: hostName, penPort: penPort, isRetry: false)
+    }
+
+    private func connect(endpoint: NWEndpoint, hostName: String, penPort: UInt16, isRetry: Bool) {
         disconnect()
         self.penPort = penPort
         state = .connecting
         connectingHost = hostName
         lastEndpoint = endpoint
         lastHostName = hostName
-        reconnectDelay = 0.5  // reset backoff
+        // A retry keeps the growing backoff; a fresh connect resets it.
+        if !isRetry { reconnectDelay = 0.5 }
 
         onPong = { [weak self] nonce in
             guard let self,
@@ -644,6 +712,15 @@ public final class StreamSession: ObservableObject {
                 case .failed(let error):
                     self.state = .failed(error.localizedDescription)
                     self.scheduleReconnect()
+                case .waiting(let error):
+                    // Host unreachable (refused, no route). NWConnection
+                    // parks here and only retries on a network-path
+                    // change — not when the host comes back — so the
+                    // session sat at "Connecting…" forever. Treat it as
+                    // a failure and redial with backoff.
+                    print("[StreamSession] waiting (\(error)) — retrying with backoff")
+                    self.state = .failed(error.localizedDescription)
+                    self.scheduleReconnect()
                 case .cancelled:
                     self.state = .disconnected
                 default:
@@ -659,6 +736,11 @@ public final class StreamSession: ObservableObject {
     /// from a different display/resolution start clean. Call this before
     /// sending SetActiveDisplay.
     public func resetDecodePipeline() {
+        // The receive queue may be mid-decode on the session reset()
+        // invalidates — that raced into EXC_BAD_ACCESS inside
+        // VTDecompressionSessionDecodeFrame on display switches.
+        pipelineLock.lock()
+        defer { pipelineLock.unlock() }
         decoder.reset()
         reassembler.reset()
         lagBaselineUs = nil
@@ -881,6 +963,7 @@ public final class StreamSession: ObservableObject {
 
             // Accumulate on the receive queue; flush to @Published at
             // ~2 Hz instead of hopping to the main actor per datagram.
+            self.lastReceiveTime = CFAbsoluteTimeGetCurrent()
             self.pendingRecvBytes &+= UInt64(data.count)
             self.pendingRecvCount &+= 1
             let nowAbs = CFAbsoluteTimeGetCurrent()
@@ -905,10 +988,13 @@ public final class StreamSession: ObservableObject {
             } else {
                 // Video fragment — pass full datagram (including type byte)
                 // to the reassembler.
+                // Serialised against resetDecodePipeline() (main thread).
+                self.pipelineLock.lock()
                 if let frame = self.reassembler.push(data) {
                     self.handleCompletedFrame(frame)
                 }
                 self.requestKeyframeIfLossDetected()
+                self.pipelineLock.unlock()
             }
 
             // Continue draining.

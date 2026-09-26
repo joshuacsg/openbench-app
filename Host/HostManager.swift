@@ -102,6 +102,15 @@ final class HostManager: ObservableObject {
         frameTimingEnabled = defaults.bool(forKey: Self.frameTimingKey)
         checkPermissions()
 
+        // flux-host's in-process display list never learns about displays
+        // created after it launched (its main thread doesn't service
+        // CoreGraphics reconfiguration events), so a virtual display
+        // appearing / vanishing / resizing restarts the stream. Viewers
+        // redial on their own and restore their chosen display.
+        virtualDisplay.onDisplayChanged = { [weak self] in
+            self?.restartDebounced()
+        }
+
         // `open "FastPort Host.app" --args --autostart` starts the
         // stream immediately on launch — lets a script / SSH session
         // bring the host up without touching the menu bar. Only fires

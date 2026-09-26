@@ -219,8 +219,10 @@ struct StreamView: View {
 
     /// Currently selected display ID (nil = Unified / host decides).
     @State private var selectedDisplayID: UInt32? = nil
-    /// One-shot per connection: pick the first display instead of the
-    /// unified all-displays composite once the host reports its list.
+    /// One-shot per connection: re-apply the remembered display (or the
+    /// first one) once the host reports its list. Every new connection
+    /// starts on the host's default display, so this re-arms on each
+    /// reconnect.
     @State private var didAutoSelectDisplay = false
 
     /// Local cursor position in view coordinates (for software cursor overlay).
@@ -266,6 +268,26 @@ struct StreamView: View {
     private let thumbnailRefreshTimer =
         Timer.publish(every: 3, on: .main, in: .common).autoconnect()
 
+    private var rememberedNameKey: String { "stream.lastDisplayName.\(host.name)" }
+
+    /// Last display picked on this host, persisted across launches:
+    /// nil = never picked, .some(nil) = "All Displays", .some(id).
+    private var rememberedDisplay: UInt32?? {
+        get {
+            let key = "stream.lastDisplay.\(host.name)"
+            guard UserDefaults.standard.object(forKey: key) != nil else { return nil }
+            let raw = UserDefaults.standard.integer(forKey: key)
+            return .some(raw == 0 ? nil : UInt32(raw))
+        }
+        nonmutating set {
+            let key = "stream.lastDisplay.\(host.name)"
+            switch newValue {
+            case .none: UserDefaults.standard.removeObject(forKey: key)
+            case .some(let id): UserDefaults.standard.set(Int(id ?? 0), forKey: key)
+            }
+        }
+    }
+
     var body: some View {
         ZStack {
             Color(white: 0.08).ignoresSafeArea()
@@ -305,14 +327,32 @@ struct StreamView: View {
             // the empty strip between controls — right where the Mac
             // menu bar renders. Buttons hit-test on their own.
             .onReceive(session.$availableDisplays) { displays in
-                // Default to the first display (zero-copy single-display
-                // path on the host) instead of the unified composite.
-                guard !didAutoSelectDisplay, selectedDisplayID == nil,
-                      let first = displays.first else { return }
+                // Restore the display the user last picked on this host;
+                // otherwise default to the first display (zero-copy
+                // single-display path) instead of the unified composite.
+                guard !didAutoSelectDisplay, let first = displays.first else { return }
                 didAutoSelectDisplay = true
-                selectedDisplayID = first.id
+                let target: UInt32?
+                switch rememberedDisplay {
+                case .some(.none):
+                    target = nil // "All Displays"
+                case .some(.some(let id)) where displays.contains(where: { $0.id == id }):
+                    target = id
+                case .some(.some):
+                    // IDs aren't stable for every display — a virtual
+                    // display gets a fresh one each time it's created —
+                    // so fall back to the remembered name.
+                    let name = UserDefaults.standard.string(forKey: rememberedNameKey)
+                    target = displays.first(where: { !$0.name.isEmpty && $0.name == name })?.id ?? first.id
+                default:
+                    target = first.id
+                }
+                selectedDisplayID = target
                 session.resetDecodePipeline()
-                session.sendControl(.setActiveDisplay(displayId: first.id))
+                session.sendControl(.setActiveDisplay(displayId: target))
+            }
+            .onChange(of: session.state) { _, state in
+                if state == .connected { didAutoSelectDisplay = false }
             }
         }
 #if canImport(UIKit)
@@ -368,6 +408,11 @@ struct StreamView: View {
                         selectedDisplayID: selectedDisplayID,
                         onSelect: { displayID in
                             selectedDisplayID = displayID
+                            rememberedDisplay = .some(displayID)
+                            UserDefaults.standard.set(
+                                session.availableDisplays.first(where: { $0.id == displayID })?.name,
+                                forKey: rememberedNameKey
+                            )
                             session.resetDecodePipeline()
                             session.sendControl(.setActiveDisplay(displayId: displayID))
                             closeDisplaySidebar()
