@@ -616,6 +616,85 @@ public final class InputCaptureView: UIView, UIKeyInput, UIPointerInteractionDel
         inputManager?.keyUp("Backspace")
     }
 
+    // MARK: - Soft-keyboard key bar
+    //
+    // The on-screen keyboard has no arrows, Esc or Tab. This bar rides
+    // on top of it (inputAccessoryView); arrows auto-repeat while held,
+    // like a hardware key.
+
+    private static let keyBarKeys: [(title: String, key: String, repeats: Bool)] = [
+        ("esc", "Escape", false),
+        ("tab", "Tab", false),
+        ("←", "ArrowLeft", true),
+        ("↓", "ArrowDown", true),
+        ("↑", "ArrowUp", true),
+        ("→", "ArrowRight", true),
+    ]
+
+    private var keyRepeatTimer: Timer?
+    private lazy var keyBar: UIView = makeKeyBar()
+
+    public override var inputAccessoryView: UIView? { keyBar }
+
+    private func makeKeyBar() -> UIView {
+        let bar = UIInputView(
+            frame: CGRect(x: 0, y: 0, width: 0, height: 48),
+            inputViewStyle: .keyboard
+        )
+        let stack = UIStackView()
+        stack.axis = .horizontal
+        stack.spacing = 6
+        stack.distribution = .fillEqually
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        for (index, entry) in Self.keyBarKeys.enumerated() {
+            var config = UIButton.Configuration.gray()
+            config.title = entry.title
+            config.baseForegroundColor = .label
+            let button = UIButton(configuration: config)
+            button.tag = index
+            button.addTarget(self, action: #selector(keyBarDown(_:)), for: .touchDown)
+            button.addTarget(self, action: #selector(keyBarUp(_:)),
+                             for: [.touchUpInside, .touchUpOutside, .touchCancel])
+            stack.addArrangedSubview(button)
+        }
+        bar.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: bar.leadingAnchor, constant: 8),
+            stack.trailingAnchor.constraint(equalTo: bar.trailingAnchor, constant: -8),
+            stack.topAnchor.constraint(equalTo: bar.topAnchor, constant: 6),
+            stack.bottomAnchor.constraint(equalTo: bar.bottomAnchor, constant: -6),
+        ])
+        return bar
+    }
+
+    @objc private func keyBarDown(_ sender: UIButton) {
+        let entry = Self.keyBarKeys[sender.tag]
+        tapKey(entry.key)
+        keyRepeatTimer?.invalidate()
+        guard entry.repeats else { return }
+        // Hardware-like repeat: 0.4 s delay, then ~14 presses/s.
+        let timer = Timer(timeInterval: 0.4, repeats: false) { [weak self] _ in
+            guard let self else { return }
+            let repeating = Timer(timeInterval: 0.07, repeats: true) { [weak self] _ in
+                self?.tapKey(entry.key)
+            }
+            RunLoop.main.add(repeating, forMode: .common)
+            self.keyRepeatTimer = repeating
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        keyRepeatTimer = timer
+    }
+
+    @objc private func keyBarUp(_ sender: UIButton) {
+        keyRepeatTimer?.invalidate()
+        keyRepeatTimer = nil
+    }
+
+    private func tapKey(_ key: String) {
+        inputManager?.keyDown(key)
+        inputManager?.keyUp(key)
+    }
+
     public override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
         for press in presses {
             if let key = press.key, let name = uiKeyToName(key) {
