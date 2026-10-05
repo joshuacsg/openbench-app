@@ -216,6 +216,7 @@ struct StreamView: View {
     @StateObject private var session = StreamSession()
     @StateObject private var inputManager = InputManager()
     @StateObject private var clipboardManager = ClipboardManager()
+    @State private var controlRepeater = ControlMessageRepeater()
 
     /// Currently selected display ID (nil = Unified / host decides).
     @State private var selectedDisplayID: UInt32? = nil
@@ -349,10 +350,25 @@ struct StreamView: View {
                 }
                 selectedDisplayID = target
                 session.resetDecodePipeline()
-                session.sendControl(.setActiveDisplay(displayId: target))
+                controlRepeater.send(.setActiveDisplay(displayId: target)) { [weak session] in
+                    session?.sendControl($0)
+                }
             }
             .onChange(of: session.state) { _, state in
-                if state == .connected { didAutoSelectDisplay = false }
+                if state == .connected {
+                    didAutoSelectDisplay = false
+#if canImport(UIKit)
+                    // A new host connection starts unpaused; re-apply
+                    // the current visibility even if the mode is unchanged.
+                    session.isDecodePaused = monitorDrivesInput
+                    controlRepeater.send(.setVideoPaused(paused: monitorDrivesInput)) { [weak session] in
+                        session?.sendControl($0)
+                    }
+#endif
+                } else {
+                    controlRepeater.cancelAll()
+                    inputManager.cancelPendingControls()
+                }
             }
         }
 #if canImport(UIKit)
@@ -414,7 +430,9 @@ struct StreamView: View {
                                 forKey: rememberedNameKey
                             )
                             session.resetDecodePipeline()
-                            session.sendControl(.setActiveDisplay(displayId: displayID))
+                            controlRepeater.send(.setActiveDisplay(displayId: displayID)) { [weak session] in
+                                session?.sendControl($0)
+                            }
                             closeDisplaySidebar()
                         },
                         onClose: { closeDisplaySidebar() }
@@ -442,6 +460,13 @@ struct StreamView: View {
             previous.sendControl(.mouseButton(button: 0, pressed: false))
             previous.sendControl(.mouseButton(button: 1, pressed: false))
             session.isDecodePaused = toMonitor
+            controlRepeater.send(.setVideoPaused(paused: toMonitor)) { [weak session] in
+                session?.sendControl($0)
+            }
+            // Cancel pending key releases and bind retries to the new
+            // destination rather than following a changing input route.
+            let target = external.inputSession(primary: session)
+            inputManager.sendControl = { [weak target] in target?.sendControl($0) }
             if !toMonitor { external.monitorCursor = nil }
         }
 #endif
@@ -453,10 +478,9 @@ struct StreamView: View {
             // has input: the iPad's, or the external monitor's while the
             // iPad is its trackpad.
             attachExternalDisplay()
-            inputManager.sendControl = { [weak session, weak external] message in
-                guard let session else { return }
-                (external?.inputSession(primary: session) ?? session).sendControl(message)
-            }
+            session.isDecodePaused = monitorDrivesInput
+            let target = external.inputSession(primary: session)
+            inputManager.sendControl = { [weak target] in target?.sendControl($0) }
 
             // Apple Pencil → dedicated pen flow (pressure + tilt at
             // 240 Hz, isolated from pixel traffic).
@@ -516,6 +540,7 @@ struct StreamView: View {
             }
         }
         .onDisappear {
+            controlRepeater.cancelAll()
 #if canImport(UIKit)
             external.detachPrimary(session)
             session.isDecodePaused = false

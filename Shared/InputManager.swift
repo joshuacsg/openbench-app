@@ -58,6 +58,8 @@ public enum ControlMessage {
     /// spent its time: PD = encodeDoneUs - captureUs, host queue =
     /// sentUs - encodeDoneUs.
     case frameTiming(frameId: UInt64, captureUs: UInt64, encodeDoneUs: UInt64, sentUs: UInt64)
+    /// Pause this viewer's host video pipeline while its video is hidden.
+    case setVideoPaused(paused: Bool)
 
     /// Encode to the serde externally-tagged JSON form.
     public func toJSON() -> Data? {
@@ -115,6 +117,8 @@ public enum ControlMessage {
                 "encode_done_us": encodeDoneUs,
                 "sent_us": sentUs,
             ]]
+        case .setVideoPaused(let paused):
+            dict = ["SetVideoPaused": ["paused": paused]]
         }
         return try? JSONSerialization.data(withJSONObject: dict)
     }
@@ -162,6 +166,60 @@ public enum ControlMessage {
     }
 }
 
+/// Repeats idempotent control edges over the lossy datagram path.
+/// Call on the main queue; each instance belongs to one input/session route.
+final class ControlMessageRepeater {
+    private enum Edge: Hashable {
+        case key(String)
+        case display
+        case videoPaused
+    }
+
+    private var pending: [Edge: UUID] = [:]
+
+    func cancelAll() {
+        pending.removeAll()
+    }
+
+    func send(_ message: ControlMessage, using send: @escaping (ControlMessage) -> Void) {
+        let edge: Edge
+        let delays: [Double]
+        switch message {
+        case .keyEvent(let key, _, let pressed):
+            edge = .key(key)
+            if pressed {
+                // A stale release must never lift a key held again.
+                pending.removeValue(forKey: edge)
+                send(message)
+                return
+            }
+            delays = [0.05, 0.15]
+        case .setActiveDisplay:
+            edge = .display
+            delays = [0.1, 0.3]
+        case .setVideoPaused:
+            edge = .videoPaused
+            delays = [0.1, 0.3]
+        default:
+            send(message)
+            return
+        }
+
+        // A generation also cancels old releases after a down/up cycle,
+        // and old display/pause repeats when the latest state changes.
+        let generation = UUID()
+        pending[edge] = generation
+        send(message)
+        for (index, delay) in delays.enumerated() {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                guard let self, self.pending[edge] == generation else { return }
+                if index == delays.count - 1 { self.pending.removeValue(forKey: edge) }
+                send(message)
+            }
+        }
+    }
+}
+
 // MARK: - Input manager
 
 /// Manages input capture state and sends messages to the host.
@@ -169,7 +227,10 @@ public enum ControlMessage {
 /// KeyboardInputManager) call these methods.
 public final class InputManager: ObservableObject {
     /// Callback to send a control message to the host.
-    public var sendControl: ((ControlMessage) -> Void)?
+    public var sendControl: ((ControlMessage) -> Void)? {
+        didSet { controlRepeater.cancelAll() }
+    }
+    private let controlRepeater = ControlMessageRepeater()
 
     /// Callback to send a stylus sample via flux-core-ffi.
     /// Set by the StreamSession when the pen connection is available.
@@ -178,6 +239,10 @@ public final class InputManager: ObservableObject {
     @Published public var isKeyboardActive = false
 
     public init() {}
+
+    public func cancelPendingControls() {
+        controlRepeater.cancelAll()
+    }
 
     // MARK: - Mouse / trackpad
 
@@ -227,18 +292,20 @@ public final class InputManager: ObservableObject {
     /// AppSwitch). Rides the KeyEvent message; the host triggers on
     /// press and ignores the release.
     public func tapHostAction(_ name: String) {
-        sendControl?(.keyEvent(key: name, modifiers: 0, pressed: true))
-        sendControl?(.keyEvent(key: name, modifiers: 0, pressed: false))
+        keyDown(name)
+        keyUp(name)
     }
 
     // MARK: - Keyboard
 
-    public func keyDown(_ key: String) {
-        sendControl?(.keyEvent(key: key, modifiers: 0, pressed: true))
+    public func keyDown(_ key: String, modifiers: UInt16 = 0) {
+        guard let sendControl else { return }
+        controlRepeater.send(.keyEvent(key: key, modifiers: modifiers, pressed: true), using: sendControl)
     }
 
-    public func keyUp(_ key: String) {
-        sendControl?(.keyEvent(key: key, modifiers: 0, pressed: false))
+    public func keyUp(_ key: String, modifiers: UInt16 = 0) {
+        guard let sendControl else { return }
+        controlRepeater.send(.keyEvent(key: key, modifiers: modifiers, pressed: false), using: sendControl)
     }
 
     public func textInput(_ text: String) {
@@ -258,7 +325,8 @@ public final class InputManager: ObservableObject {
     // MARK: - Display switching
 
     public func setActiveDisplay(_ displayId: UInt32?) {
-        sendControl?(.setActiveDisplay(displayId: displayId))
+        guard let sendControl else { return }
+        controlRepeater.send(.setActiveDisplay(displayId: displayId), using: sendControl)
     }
 }
 
