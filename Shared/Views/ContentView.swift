@@ -225,8 +225,10 @@ struct StreamView: View {
     /// reconnect.
     @State private var didAutoSelectDisplay = false
 
-    /// Local cursor position in view coordinates (for software cursor overlay).
-    @State private var cursorPosition: CGPoint? = nil
+#if canImport(UIKit)
+    /// Only the cursor overlay observes per-move position changes.
+    @State private var cursor = StreamCursorState()
+#endif
 
     /// Soft keyboard visibility toggle (iOS only).
     @State private var showKeyboard = false
@@ -575,8 +577,11 @@ struct StreamView: View {
     private var videoStack: some View {
         ZStack {
             MetalVideoView(session: session)
-                .clipShape(RoundedRectangle(cornerRadius: 12))
-                .shadow(color: .black.opacity(0.5), radius: 16, y: 4)
+                .background {
+                    RoundedRectangle(cornerRadius: 12)
+                        .fill(.black)
+                        .shadow(color: .black.opacity(0.5), radius: 16, y: 4)
+                }
                 .scaleEffect(viewportScale)
                 .offset(x: viewportOffset.x, y: viewportOffset.y)
 
@@ -588,7 +593,7 @@ struct StreamView: View {
                 trackpadMode: trackpadMode,
                 viewportScale: viewportScale,
                 viewportOffset: viewportOffset,
-                onPointerMoved: { pt in cursorPosition = pt },
+                onPointerMoved: { pt in cursor.position = pt },
                 onViewportChanged: { scale, offset in
                     viewportScale = scale
                     viewportOffset = offset
@@ -602,12 +607,8 @@ struct StreamView: View {
 #endif
 #if canImport(UIKit)
             // Software cursor for trackpad/mouse
-            if let pos = cursorPosition {
-                CursorCrosshair()
-                    .frame(width: 20, height: 20)
-                    .position(x: pos.x, y: pos.y)
-                    .allowsHitTesting(false)
-            }
+            StreamCursorOverlay(cursor: cursor)
+                .allowsHitTesting(false)
 #endif
         }
     }
@@ -987,6 +988,27 @@ import UIKit
 
 // MARK: - Software cursor shape
 
+/// Cursor updates invalidate only the small overlay that observes this model.
+final class StreamCursorState: ObservableObject {
+    @Published var position: CGPoint?
+}
+
+private struct StreamCursorOverlay: View {
+    @ObservedObject var cursor: StreamCursorState
+
+    var body: some View {
+        // Fill the same coordinate space as the input view even when hidden.
+        ZStack {
+            if let pos = cursor.position {
+                CursorCrosshair()
+                    .frame(width: 20, height: 20)
+                    .position(x: pos.x, y: pos.y)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
 /// A crosshair cursor centered on the pointer position.
 struct CursorCrosshair: View {
     var body: some View {
@@ -1070,8 +1092,8 @@ struct MetalVideoView: UIViewRepresentable {
 
     func makeUIView(context: Context) -> MetalHostView {
         let view = MetalHostView()
-        session.onDecodedFrame = { [weak view] pb, _ in
-            view?.renderer?.enqueue(pb)
+        session.onDecodedFrame = { [weak renderer = view.renderer] pb, _ in
+            renderer?.enqueue(pb)
         }
         return view
     }
@@ -1086,21 +1108,20 @@ struct MetalVideoView: UIViewRepresentable {
             backgroundColor = .black
             guard let r = MetalRenderer() else { return }
             renderer = r
-            r.metalLayer.frame = bounds
+            layer.cornerRadius = 12
+            layer.masksToBounds = true
+            r.setFrame(bounds)
             layer.addSublayer(r.metalLayer)
-            r.startDisplayLink()
         }
 
         required init?(coder: NSCoder) { fatalError() }
 
         override func layoutSubviews() {
             super.layoutSubviews()
-            renderer?.metalLayer.frame = bounds
+            renderer?.setFrame(bounds)
         }
 
-        deinit {
-            renderer?.stopDisplayLink()
-        }
+        deinit { renderer?.stop() }
     }
 }
 #elseif canImport(AppKit)
@@ -1135,11 +1156,8 @@ struct MetalVideoView: NSViewRepresentable {
 
     func makeNSView(context: Context) -> MetalHostView {
         let view = MetalHostView()
-        session.onDecodedFrame = { [weak view] pb, _ in
-            view?.renderer?.enqueue(pb)
-            DispatchQueue.main.async {
-                view?.renderer?.presentIfNeeded()
-            }
+        session.onDecodedFrame = { [weak renderer = view.renderer] pb, _ in
+            renderer?.enqueue(pb)
         }
         return view
     }
@@ -1154,7 +1172,9 @@ struct MetalVideoView: NSViewRepresentable {
             wantsLayer = true
             guard let r = MetalRenderer() else { return }
             renderer = r
-            r.metalLayer.frame = bounds
+            layer?.cornerRadius = 12
+            layer?.masksToBounds = true
+            r.setFrame(bounds)
             layer?.addSublayer(r.metalLayer)
         }
 
@@ -1162,8 +1182,10 @@ struct MetalVideoView: NSViewRepresentable {
 
         override func layout() {
             super.layout()
-            renderer?.metalLayer.frame = bounds
+            renderer?.setFrame(bounds)
         }
+
+        deinit { renderer?.stop() }
     }
 }
 #endif

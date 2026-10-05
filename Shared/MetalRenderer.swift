@@ -1,10 +1,10 @@
 // MetalRenderer.swift — render decoded CVPixelBuffers to a CAMetalLayer.
 //
-// The handoff doc specifies:
+// Presentation uses:
 //   - CAMetalLayer with maximumDrawableCount = 2 (third drawable costs
 //     a full frame of latency)
-//   - presentAtTime: ~1 ms before vsync driven by CADisplayLink at
-//     120 Hz (ProMotion)
+//   - present on decode from a serial render queue, without a main-thread
+//     display-link tick before the compositor's own vsync
 //
 // The input is a CVPixelBuffer (BGRA) from the VTDecompressionSession.
 // We create a Metal texture from it and blit to the drawable.
@@ -15,27 +15,24 @@ import MetalKit
 import CoreVideo
 import QuartzCore
 
-#if canImport(UIKit)
-import UIKit
-#endif
-
 /// A SwiftUI-compatible Metal view that displays decoded video frames.
-/// Call `enqueue(_:)` from any thread; the next display refresh picks
-/// it up and presents it.
+/// Call `enqueue(_:)` from any thread; a serial render queue presents
+/// the latest frame without blocking input or the decode callback.
 public final class MetalRenderer {
     private let device: MTLDevice
     private let commandQueue: MTLCommandQueue
     private let textureCache: CVMetalTextureCache
     public let metalLayer: CAMetalLayer
 
-    /// The most recently /Users/joshuachua/Documents/GitHub/openbench-app/Sharedenqueued pixel buffer, waiting for the next
-    /// display refresh to present.
+    /// One latest-frame slot, rather than one queued closure per frame.
     private var pendingBuffer: CVPixelBuffer?
     private let lock = NSLock()
 
-    #if canImport(UIKit)
-    private var displayLink: CADisplayLink?
-    #endif
+    private var presentationScheduled = false
+    private var stopped = false
+    private let renderQueue = DispatchQueue(label: "fastport.video.render", qos: .userInteractive)
+    private let inFlight = DispatchSemaphore(value: 2)
+    private let geometryLock = NSLock()
 
     public init?() {
         guard let device = MTLCreateSystemDefaultDevice(),
@@ -63,39 +60,93 @@ public final class MetalRenderer {
         layer.framebufferOnly = false  // must be false for blit encoder copy
         layer.maximumDrawableCount = 2 // Third drawable = +1 frame latency
         layer.contentsGravity = .resizeAspect
+        layer.allowsNextDrawableTimeout = true
         #if os(macOS)
         layer.displaySyncEnabled = true
         #endif
         self.metalLayer = layer
     }
 
-    /// Enqueue a decoded frame for presentation on the next vsync.
+    /// Enqueue a decoded frame for immediate off-main presentation.
     /// Thread-safe; called from the decode callback.
     public func enqueue(_ pixelBuffer: CVPixelBuffer) {
         lock.lock()
+        guard !stopped else {
+            lock.unlock()
+            return
+        }
         pendingBuffer = pixelBuffer
+        lock.unlock()
+        presentIfNeeded()
+    }
+
+    /// Stop accepting frames when the hosting view is removed. A blocked
+    /// drawable acquisition can finish on the render queue after teardown.
+    public func stop() {
+        lock.lock()
+        stopped = true
+        pendingBuffer = nil
         lock.unlock()
     }
 
-    /// Drive presentation from a display link or timer. Call this once
-    /// per vsync to pick up the latest enqueued frame and blit it to
-    /// the drawable.
+    /// Schedule at most one drain, even if the GPU or drawable is busy.
     public func presentIfNeeded() {
         lock.lock()
-        let pb = pendingBuffer
-        pendingBuffer = nil
+        guard pendingBuffer != nil, !presentationScheduled else {
+            lock.unlock()
+            return
+        }
+        presentationScheduled = true
         lock.unlock()
+        renderQueue.async { [weak self] in self?.drainPendingFrames() }
+    }
 
-        guard let pb = pb else { return }
+    /// Layout stays on main; serialize layer geometry changes against
+    /// drawableSize writes without holding the lock during nextDrawable().
+    public func setFrame(_ frame: CGRect) {
+        geometryLock.lock()
+        defer { geometryLock.unlock() }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        metalLayer.frame = frame
+        CATransaction.commit()
+    }
+
+    private func drainPendingFrames() {
+        while true {
+            // Do not consume the latest-frame slot until GPU capacity is
+            // available. The decode callback can replace it while we wait.
+            inFlight.wait()
+            lock.lock()
+            guard let pb = pendingBuffer else {
+                presentationScheduled = false
+                lock.unlock()
+                inFlight.signal()
+                return
+            }
+            pendingBuffer = nil
+            lock.unlock()
+            autoreleasepool { render(pb) }
+        }
+    }
+
+    private func render(_ pb: CVPixelBuffer) {
+        var submitted = false
+        defer { if !submitted { inFlight.signal() } }
 
         let width = CVPixelBufferGetWidth(pb)
         let height = CVPixelBufferGetHeight(pb)
 
         // Update the layer's drawable size if the frame resolution changed.
         let drawableSize = CGSize(width: width, height: height)
+        geometryLock.lock()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
         if metalLayer.drawableSize != drawableSize {
             metalLayer.drawableSize = drawableSize
         }
+        CATransaction.commit()
+        geometryLock.unlock()
 
         // Create a Metal texture from the CVPixelBuffer.
         var cvTexture: CVMetalTexture?
@@ -140,36 +191,18 @@ public final class MetalRenderer {
             destinationOrigin: MTLOriginMake(0, 0, 0)
         )
         blitEncoder.endEncoding()
+        // Metal retains its texture, but not the CVMetalTexture wrapper
+        // or pixel buffer. Keep both alive until the blit has finished.
+        let slots = inFlight
+        let cache = textureCache
+        commandBuffer.addCompletedHandler { [pb, cvTexture] _ in
+            withExtendedLifetime((pb, cvTexture)) {
+                CVMetalTextureCacheFlush(cache, 0)
+            }
+            slots.signal()
+        }
         commandBuffer.present(drawable)
+        submitted = true
         commandBuffer.commit()
-
-        // Flush stale entries from the texture cache so CVPixelBuffer
-        // backing memory can be reclaimed. Without this the cache grows
-        // unbounded and the OS kills the app for memory pressure.
-        CVMetalTextureCacheFlush(textureCache, 0)
     }
-
-    #if canImport(UIKit)
-    /// Start a CADisplayLink that drives presentation at the display's
-    /// native refresh rate (120 Hz on ProMotion iPads).
-    public func startDisplayLink() {
-        let link = CADisplayLink(target: self, selector: #selector(displayLinkFired))
-        link.preferredFrameRateRange = CAFrameRateRange(
-            minimum: 30,
-            maximum: 120,
-            preferred: 120
-        )
-        link.add(to: .main, forMode: .common)
-        displayLink = link
-    }
-
-    public func stopDisplayLink() {
-        displayLink?.invalidate()
-        displayLink = nil
-    }
-
-    @objc private func displayLinkFired(_ link: CADisplayLink) {
-        presentIfNeeded()
-    }
-    #endif
 }
