@@ -25,6 +25,7 @@ public struct VideoPacketHeader {
     /// group index; payload = 2 length bytes + XOR of the group's
     /// payloads. One recoverable loss per group of 16.
     public var isFECParity: Bool { flags & 0x20 != 0 }
+    public var isLastGroup: Bool { isFECParity && flags & 0x40 != 0 }
 
     public static let headerLength = 19
 
@@ -46,12 +47,23 @@ public struct VideoPacketHeader {
 /// then concatenated in order and returned as a single Annex-B byte
 /// stream.
 public final class FrameReassembler {
-    private struct PendingFrame {
-        var fragments: [UInt16: Data] // fragment_idx → payload
-        var parity: [UInt16: Data]    // FEC group → parity payload
-        var totalFragments: Int?       // set when LAST_FRAGMENT arrives
+    private final class PendingFrame {
+        var fragments: [UInt16: Data] = [:] // fragment_idx → payload
+        var parity: [UInt16: Data] = [:]    // FEC group → parity payload
+        var totalFragments: Int?
+        var lastGroup: Int?
+        var receivedFragments = 0
         var isKeyframe: Bool
-        var timestampUs: UInt64
+        let timestampUs: UInt64
+        let firstSeen: TimeInterval
+
+        init(header: VideoPacketHeader, now: TimeInterval) {
+            isKeyframe = header.isKeyframe
+            timestampUs = header.timestampUs
+            firstSeen = now
+            fragments.reserveCapacity(32)
+            parity.reserveCapacity(4)
+        }
     }
 
     private static let fecGroupSize = 16
@@ -64,15 +76,23 @@ public final class FrameReassembler {
     /// trailing parity fabricates phantom pending entries that read as
     /// loss and trigger spurious keyframe requests at zero actual loss.
     private var lastDelivered: UInt16?
+    // Includes expired frames so late fragments cannot resurrect a loss
+    // or make the next delivery count that same gap twice.
+    private var lastRetired: UInt16?
+    private var lastVideoTraffic: TimeInterval = 0
 
-    /// Incomplete frames superseded by a delivered newer frame — i.e.
-    /// frames actually lost to the network. Drives keyframe re-requests.
+    /// Missing frame ids and incomplete frames superseded or expired.
+    /// Drives keyframe re-requests and post-FEC frame-loss feedback.
     public private(set) var discarded: UInt64 = 0
     /// Data fragments reconstructed from FEC parity.
     public private(set) var recovered: UInt64 = 0
     /// Complete frames delivered. With `discarded`, gives a true frame
     /// loss ratio for QualityFeedback.
     public private(set) var delivered: UInt64 = 0
+    /// Settled data fragments, including those missing before FEC.
+    /// Unknown-size lost frames contribute a lower bound (at least one).
+    public private(set) var totalDataFragments: UInt64 = 0
+    public private(set) var lostDataFragments: UInt64 = 0
 
     /// `true` if `a` is strictly newer than `b` in wrapping u16 space.
     private static func newer(_ a: UInt16, _ b: UInt16) -> Bool {
@@ -98,15 +118,21 @@ public final class FrameReassembler {
         needsReset = true
     }
 
-    /// Push one datagram (header + payload). Returns a complete frame
-    /// when the last fragment of a frame arrives.
-    public func push(_ datagram: Data) -> ReassembledFrame? {
+    private func applyResetIfNeeded() {
         if needsReset {
             pending.removeAll()
             latestFrameId = 0
             lastDelivered = nil
+            lastRetired = nil
+            lastVideoTraffic = 0
             needsReset = false
         }
+    }
+
+    /// Push one datagram; return a complete frame after data or parity
+    /// supplies its last missing fragment. `now` uses a monotonic clock.
+    public func push(_ datagram: Data, now: TimeInterval = ProcessInfo.processInfo.systemUptime) -> ReassembledFrame? {
+        applyResetIfNeeded()
         guard let header = VideoPacketHeader.decode(datagram) else { return nil }
         let payloadStart = datagram.startIndex + VideoPacketHeader.headerLength
         let payloadEnd = payloadStart + Int(header.payloadLen)
@@ -121,32 +147,29 @@ public final class FrameReassembler {
         // of a frame that already completed. A keyframe *data* fragment
         // of a strictly older frame means the sender's counter reset —
         // resync.
-        if let last = lastDelivered, !Self.newer(fid, last) {
-            let isResync = header.isKeyframe && !header.isFECParity && fid != last
+        if let last = lastRetired, !Self.newer(fid, last) {
+            let isResync = header.isKeyframe && !header.isFECParity
+                && fid != last && fid != lastDelivered
             guard isResync else { return nil }
             pending.removeAll()
             lastDelivered = nil
+            lastRetired = nil
         }
+        lastVideoTraffic = now
 
         // Track the latest frame_id seen.
         if fid &- latestFrameId < 0x8000 { // fid is ahead
             latestFrameId = fid
         }
-        // Memory bound: evict (without counting — loss accounting
-        // happens on delivery below) anything absurdly far behind.
-        if pending.count > 8 {
-            pending = pending.filter { key, _ in
-                latestFrameId &- key < 32
-            }
+        // Reference storage avoids copying both dictionaries for every
+        // fragment while the pending table still owns the frame.
+        let frame: PendingFrame
+        if let existing = pending[fid] {
+            frame = existing
+        } else {
+            frame = PendingFrame(header: header, now: now)
+            pending[fid] = frame
         }
-
-        var frame = pending[fid] ?? PendingFrame(
-            fragments: [:],
-            parity: [:],
-            totalFragments: nil,
-            isKeyframe: header.isKeyframe,
-            timestampUs: header.timestampUs
-        )
         if header.isKeyframe { frame.isKeyframe = true }
 
         if header.isFECParity {
@@ -154,27 +177,30 @@ public final class FrameReassembler {
             if frame.parity[fidx] == nil {
                 frame.parity[fidx] = Data(payload)
             }
-            tryRecover(frame: &frame, group: Int(fidx))
+            if header.isLastGroup { frame.lastGroup = Int(fidx) }
+            tryRecover(frame: frame, group: Int(fidx))
         } else {
             // Int math: `fidx + 1` in UInt16 traps on a crafted 0xFFFF.
             let idx = Int(fidx)
             if let total = frame.totalFragments, idx >= total {
                 // Bogus index past the announced total — discard, or it
                 // would satisfy the completion count with a hole.
-                pending[fid] = frame
                 return nil
             }
-            frame.fragments[fidx] = Data(payload)
+            if frame.fragments[fidx] == nil {
+                frame.receivedFragments += 1
+                frame.fragments[fidx] = Data(payload)
+            }
             if header.isLastFragment, frame.totalFragments == nil {
                 frame.totalFragments = idx + 1
                 // Drop any out-of-range fragments that arrived earlier.
                 frame.fragments = frame.fragments.filter { Int($0.key) <= idx }
                 // Group bounds just became knowable — sweep all groups.
                 for group in frame.parity.keys {
-                    tryRecover(frame: &frame, group: Int(group))
+                    tryRecover(frame: frame, group: Int(group))
                 }
             } else {
-                tryRecover(frame: &frame, group: idx / Self.fecGroupSize)
+                tryRecover(frame: frame, group: idx / Self.fecGroupSize)
             }
         }
 
@@ -185,6 +211,7 @@ public final class FrameReassembler {
             // (count satisfied by a bogus index would corrupt the
             // decoder otherwise).
             var assembled = Data()
+            assembled.reserveCapacity(frame.fragments.values.reduce(0) { $0 + $1.count })
             for i in 0..<total {
                 guard let frag = frame.fragments[UInt16(i)] else { return nil }
                 assembled.append(frag)
@@ -193,13 +220,11 @@ public final class FrameReassembler {
             // Loss accounting at delivery time (~1 frame period, not
             // the old ~10 s eviction lag): any pending frame older than
             // the one we're delivering was superseded — lost.
-            let stale = pending.keys.filter { Self.newer(fid, $0) }
-            for key in stale {
-                pending.removeValue(forKey: key)
-                discarded &+= 1
-            }
+            retireLosses(before: fid, countGaps: !frame.isKeyframe)
             lastDelivered = fid
+            lastRetired = fid
             delivered &+= 1
+            accountFragments(frame, lost: false)
 
             return ReassembledFrame(
                 data: assembled,
@@ -207,19 +232,41 @@ public final class FrameReassembler {
                 timestampUs: frame.timestampUs
             )
         } else {
-            pending[fid] = frame
+            // Bound incomplete assemblies even during a long loss burst.
+            if pending.count > 8,
+               let oldest = pending.keys.max(by: { latestFrameId &- $0 < latestFrameId &- $1 }) {
+                discardThrough(oldest)
+            }
             return nil
         }
     }
 
-    /// XOR-recover a single missing data fragment in `group`, if its
-    /// parity is present and the frame's total fragment count is known
-    /// (group bounds depend on it).
-    private func tryRecover(frame: inout PendingFrame, group: Int) {
-        guard let total = frame.totalFragments,
-              let parity = frame.parity[UInt16(clamping: group)],
+    /// Recover one missing data fragment. Full groups have fixed bounds;
+    /// LAST_FRAGMENT or LAST_GROUP bounds the frame's final group.
+    private func tryRecover(frame: PendingFrame, group: Int) {
+        guard let parity = frame.parity[UInt16(clamping: group)],
               parity.count >= 2 else { return }
         let start = group * Self.fecGroupSize
+        guard start < 65536 else { return }
+        var inferredTotal: Int?
+        var recoveryEnd: Int?
+        if frame.totalFragments == nil, frame.lastGroup == group {
+            // LAST_GROUP adds no payload bytes. With one loss, contiguous
+            // data implies a missing tail; otherwise repair the gap first
+            // and let LAST_FRAGMENT announce the total when it arrives.
+            let seen = (start..<min(start + Self.fecGroupSize, 65536))
+                .filter { frame.fragments[UInt16($0)] != nil }
+            let end = (seen.last.map { $0 + 1 }) ?? start
+            let gaps = (start..<end).filter { frame.fragments[UInt16($0)] == nil }
+            guard gaps.count <= 1 else { return }
+            if gaps.isEmpty {
+                guard end < min(start + Self.fecGroupSize, 65536) else { return }
+                inferredTotal = end + 1
+            } else {
+                recoveryEnd = end
+            }
+        }
+        let total = frame.totalFragments ?? inferredTotal ?? recoveryEnd ?? (start + Self.fecGroupSize)
         guard start >= 0, start < total else { return }
         let end = min(start + Self.fecGroupSize, total)
 
@@ -242,7 +289,48 @@ public final class FrameReassembler {
         }
         guard Int(len) <= data.count else { return } // inconsistent parity
         frame.fragments[UInt16(missingIdx)] = Data(data.prefix(Int(len)))
+        if let inferredTotal { frame.totalFragments = inferredTotal }
         recovered &+= 1
+    }
+
+    private func accountFragments(_ frame: PendingFrame, lost: Bool) {
+        let observedEnd = frame.fragments.keys.max().map { Int($0) + 1 } ?? 0
+        let total = frame.totalFragments ?? max(observedEnd, frame.fragments.count + (lost ? 1 : 0))
+        totalDataFragments &+= UInt64(total)
+        lostDataFragments &+= UInt64(max(0, total - frame.receivedFragments))
+    }
+
+    private func retireLosses(before fid: UInt16, countGaps: Bool) {
+        let stale = pending.keys.filter { Self.newer(fid, $0) }
+        let gap = countGaps ? lastRetired.map { Int(fid &- $0) - 1 } ?? 0 : 0
+        let unseen = max(0, gap - stale.count)
+        discarded &+= UInt64(stale.count + unseen)
+        // No fragment metadata survives a wholly missing frame.
+        totalDataFragments &+= UInt64(unseen)
+        lostDataFragments &+= UInt64(unseen)
+        for key in stale {
+            if let frame = pending.removeValue(forKey: key) { accountFragments(frame, lost: true) }
+        }
+    }
+
+    private func discardThrough(_ fid: UInt16) {
+        retireLosses(before: fid, countGaps: true)
+        if let frame = pending.removeValue(forKey: fid) {
+            discarded &+= 1
+            accountFragments(frame, lost: true)
+        }
+        lastRetired = fid
+    }
+
+    /// Called on the receive queue even while the sender is idle. Only
+    /// video silence counts: pongs must not keep a broken tail alive.
+    public func expireStalledFrames(now: TimeInterval = ProcessInfo.processInfo.systemUptime,
+                                    timeout: TimeInterval) {
+        applyResetIfNeeded()
+        guard now - lastVideoTraffic >= timeout,
+              let newest = pending.keys.min(by: { latestFrameId &- $0 < latestFrameId &- $1 }),
+              let frame = pending[newest], now - frame.firstSeen >= timeout else { return }
+        discardThrough(newest)
     }
 }
 
@@ -264,3 +352,205 @@ private extension Data {
         return val
     }
 }
+
+#if FRAME_REASSEMBLER_TESTS
+// Standalone pure-logic suite (no Xcode test target/source registration):
+// swiftc -parse-as-library -D FRAME_REASSEMBLER_TESTS Shared/FrameReassembler.swift -o /tmp/frame-reassembler-tests
+private struct FrameReassemblerTests {
+    private func checkEqual<T: Equatable>(_ actual: T, _ expected: T, _ message: String = "",
+                                           file: StaticString = #file, line: UInt = #line) {
+        precondition(actual == expected, "\(message): \(actual) != \(expected)", file: file, line: line)
+    }
+
+    private func checkNil<T>(_ actual: T?, file: StaticString = #file, line: UInt = #line) {
+        precondition(actual == nil, "expected nil", file: file, line: line)
+    }
+
+    private func checkNotNil<T>(_ actual: T?, file: StaticString = #file, line: UInt = #line) {
+        precondition(actual != nil, "expected a completed frame", file: file, line: line)
+    }
+
+    private func packet(_ fid: UInt16, _ idx: UInt16, flags: UInt16 = 0, payload: Data = Data([1])) -> Data {
+        var result = Data([1])
+        func append(_ value: UInt64, bytes: Int) {
+            for shift in stride(from: (bytes - 1) * 8, through: 0, by: -8) {
+                result.append(UInt8(truncatingIfNeeded: value >> shift))
+            }
+        }
+        append(UInt64(fid) << 16 | UInt64(idx), bytes: 4)
+        append(123, bytes: 8)
+        append(UInt64(flags), bytes: 2)
+        append(UInt64(payload.count), bytes: 4)
+        result.append(payload)
+        return result
+    }
+
+    private func parity(_ payloads: [Data]) -> Data {
+        var length: UInt16 = 0
+        var bytes = [UInt8](repeating: 0, count: payloads.map(\.count).max() ?? 0)
+        for payload in payloads {
+            length ^= UInt16(payload.count)
+            for (index, byte) in payload.enumerated() { bytes[index] ^= byte }
+        }
+        return Data([UInt8(length >> 8), UInt8(truncatingIfNeeded: length)] + bytes)
+    }
+
+    func testWholeAndPartialLossDoNotDoubleCount() {
+        let r = FrameReassembler()
+        checkNotNil(r.push(packet(10, 0, flags: 0x11)))
+        checkNil(r.push(packet(11, 0)))
+        checkNotNil(r.push(packet(13, 0, flags: 0x10)))
+        checkEqual(r.discarded, 2) // partial 11, wholly absent 12
+        checkEqual(r.lostDataFragments, 2)
+        checkEqual(r.totalDataFragments, 5)
+        checkNil(r.push(packet(11, 1, flags: 0x10)))
+        checkNotNil(r.push(packet(14, 0, flags: 0x10)))
+        checkEqual(r.discarded, 2)
+    }
+
+    func testWrappingGapAndKeyframeResync() {
+        let r = FrameReassembler()
+        checkNotNil(r.push(packet(65534, 0, flags: 0x11)))
+        checkNotNil(r.push(packet(1, 0, flags: 0x10)))
+        checkEqual(r.discarded, 2) // 65535 and 0
+        checkNotNil(r.push(packet(5, 0, flags: 0x11)))
+        checkEqual(r.discarded, 2) // keyframe doesn't need prior refs
+        checkNotNil(r.push(packet(0, 0, flags: 0x11)))
+        checkNotNil(r.push(packet(1, 0, flags: 0x10)))
+        checkEqual(r.discarded, 2)
+    }
+
+    func testTailExpiryAndLateFragments() {
+        let r = FrameReassembler()
+        checkNotNil(r.push(packet(10, 0, flags: 0x11), now: 1))
+        checkNil(r.push(packet(11, 0), now: 2))
+        r.expireStalledFrames(now: 2.05, timeout: 0.06)
+        checkEqual(r.discarded, 0)
+        r.expireStalledFrames(now: 2.07, timeout: 0.06)
+        checkEqual(r.discarded, 1)
+        r.expireStalledFrames(now: 3, timeout: 0.06)
+        checkNil(r.push(packet(11, 1, flags: 0x10), now: 3))
+        checkNotNil(r.push(packet(12, 0, flags: 0x10), now: 3))
+        checkEqual(r.discarded, 1)
+        checkEqual(r.lostDataFragments, 1)
+    }
+
+    func testNewVideoTrafficDefersExpiry() {
+        let r = FrameReassembler()
+        checkNil(r.push(packet(1, 0), now: 1))
+        checkNil(r.push(packet(2, 0), now: 1.05))
+        r.expireStalledFrames(now: 1.07, timeout: 0.06)
+        checkEqual(r.discarded, 0)
+        r.expireStalledFrames(now: 1.12, timeout: 0.06)
+        checkEqual(r.discarded, 2)
+    }
+
+    func testEverySingleFECFragmentLossIncludingFinalGroup() {
+        for count in [1, 2, 3, 16, 17, 31, 32, 33] {
+            let payloads = (0..<count).map { Data(repeating: UInt8($0 + 1), count: $0 == count - 1 ? 1 : 3) }
+            let expected = payloads.reduce(into: Data()) { $0.append($1) }
+            for missing in 0..<count {
+                let r = FrameReassembler()
+                var completed: FrameReassembler.ReassembledFrame?
+                for idx in 0..<count where idx != missing {
+                    completed = r.push(packet(1, UInt16(idx), flags: idx == count - 1 ? 0x10 : 0,
+                                              payload: payloads[idx])) ?? completed
+                }
+                let groups = (count + 15) / 16
+                for group in 0..<groups {
+                    let payload = parity(Array(payloads[(group * 16)..<min(count, (group + 1) * 16)]))
+                    completed = r.push(packet(1, UInt16(group), flags: group == groups - 1 ? 0x60 : 0x20,
+                                              payload: payload)) ?? completed
+                }
+                checkEqual(completed?.data, expected, "count=\(count) missing=\(missing)")
+                checkEqual(r.recovered, 1)
+                checkEqual(r.discarded, 0)
+                checkEqual(r.totalDataFragments, UInt64(count))
+                checkEqual(r.lostDataFragments, 1)
+            }
+        }
+    }
+
+    func testLastGroupGapBeforeLastFragmentArrives() {
+        let r = FrameReassembler()
+        let payloads = [Data([1, 2, 3]), Data([4, 5, 6]), Data([7, 8, 9])]
+        checkNil(r.push(packet(1, 0, payload: payloads[0])))
+        checkNil(r.push(packet(1, 2, payload: payloads[2]))) // no LAST_FRAGMENT yet
+        checkNil(r.push(packet(1, 0, flags: 0x60, payload: parity(payloads))))
+        checkEqual(r.recovered, 1)
+        let completed = r.push(packet(1, 2, flags: 0x10, payload: payloads[2]))
+        checkEqual(completed?.data, Data([1, 2, 3, 4, 5, 6, 7, 8, 9]))
+        checkEqual(r.lostDataFragments, 1)
+    }
+
+    func testTwoKnownLossesCannotRecoverAndParityDuplicatesAreIgnored() {
+        let r = FrameReassembler()
+        let payloads = [Data([1]), Data([2]), Data([3])]
+        checkNil(r.push(packet(1, 2, flags: 0x10, payload: payloads[2]), now: 1))
+        let p = packet(1, 0, flags: 0x60, payload: parity(payloads))
+        checkNil(r.push(p, now: 1))
+        checkNil(r.push(p, now: 1))
+        checkEqual(r.recovered, 0)
+        r.expireStalledFrames(now: 1.1, timeout: 0.06)
+        checkEqual(r.discarded, 1)
+        checkEqual(r.totalDataFragments, 3)
+        checkEqual(r.lostDataFragments, 2)
+    }
+
+    func testResetKeepsFeedbackCountersMonotonic() {
+        let r = FrameReassembler()
+        checkNotNil(r.push(packet(100, 0, flags: 0x11), now: 1))
+        checkNil(r.push(packet(101, 0), now: 1))
+        r.reset()
+        r.expireStalledFrames(now: 2, timeout: 0.06)
+        checkNotNil(r.push(packet(1, 0, flags: 0x11), now: 2))
+        checkEqual(r.discarded, 0)
+        checkEqual(r.delivered, 2)
+        checkEqual(r.totalDataFragments, 2)
+    }
+
+    func testHealthyDuplicatesAndTrailingParity() {
+        let r = FrameReassembler()
+        let payloads = [Data([1, 2]), Data([3])]
+        let first = packet(1, 0, payload: payloads[0])
+        checkNil(r.push(first, now: 1))
+        checkNil(r.push(first, now: 1))
+        checkNotNil(r.push(packet(1, 1, flags: 0x10, payload: payloads[1]), now: 1))
+        checkNil(r.push(packet(1, 0, flags: 0x60, payload: parity(payloads)), now: 1))
+        r.expireStalledFrames(now: 2, timeout: 0.06)
+        checkEqual(r.discarded, 0)
+        checkEqual(r.recovered, 0)
+        checkEqual(r.totalDataFragments, 2)
+        checkEqual(r.lostDataFragments, 0)
+    }
+
+    func testPendingBoundCountsLossOnce() {
+        let r = FrameReassembler()
+        for fid in 1...9 { checkNil(r.push(packet(UInt16(fid), 0), now: 1)) }
+        checkEqual(r.discarded, 1)
+        r.expireStalledFrames(now: 2, timeout: 0.06)
+        checkEqual(r.discarded, 9)
+        checkNil(r.push(packet(9, 1, flags: 0x10), now: 2))
+        checkNotNil(r.push(packet(10, 0, flags: 0x10), now: 2))
+        checkEqual(r.discarded, 9)
+    }
+}
+
+@main
+private enum FrameReassemblerTestRunner {
+    static func main() {
+        let tests = FrameReassemblerTests()
+        tests.testWholeAndPartialLossDoNotDoubleCount()
+        tests.testWrappingGapAndKeyframeResync()
+        tests.testTailExpiryAndLateFragments()
+        tests.testNewVideoTrafficDefersExpiry()
+        tests.testEverySingleFECFragmentLossIncludingFinalGroup()
+        tests.testLastGroupGapBeforeLastFragmentArrives()
+        tests.testTwoKnownLossesCannotRecoverAndParityDuplicatesAreIgnored()
+        tests.testResetKeepsFeedbackCountersMonotonic()
+        tests.testHealthyDuplicatesAndTrailingParity()
+        tests.testPendingBoundCountsLossOnce()
+        print("10 reassembly tests passed (including 135 single-fragment FEC loss cases)")
+    }
+}
+#endif

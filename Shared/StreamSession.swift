@@ -107,6 +107,10 @@ public final class StreamSession: ObservableObject {
     }
 
     private var pixelConnection: NWConnection?
+    private let receiveQueue = DispatchQueue(label: "FastPort.stream.receive", qos: .userInteractive)
+    /// Active receive generation; protected by pipelineLock so old
+    /// callbacks/timers cannot alter a replacement connection's counters.
+    private var receiveConnection: NWConnection?
     private let reassembler = FrameReassembler()
     private let decoder = HEVCDecoder()
 
@@ -123,7 +127,7 @@ public final class StreamSession: ObservableObject {
 
     // Loss recovery: ask the host for a keyframe when the reassembler
     // discards an incomplete frame, instead of showing corruption /
-    // freeze until the next interval keyframe. Rate-limited.
+    // freeze until the next interval keyframe. Retried until an IDR.
     private var lastSeenDiscarded: UInt64 = 0
 
     // Drop-to-live watchdog. The decode chain cannot skip P-frames, so
@@ -173,7 +177,9 @@ public final class StreamSession: ObservableObject {
 
     /// Shared rate limit for ALL keyframe requests (loss detector +
     /// lag watchdog) so concurrent triggers can't storm the host.
-    private var lastKeyframeRequestSent: CFAbsoluteTime = 0
+    private var nextKeyframeRequestTime: TimeInterval = 0
+    private var keyframeRetryInterval: TimeInterval = 0
+    private var receiveRttMs: UInt32 = 0
 
     /// Set by the UI when the minimap is visible; thumbnail generation
     /// is skipped entirely otherwise (it was costing a full-resolution
@@ -208,10 +214,15 @@ public final class StreamSession: ObservableObject {
 #endif
 
     // Periodic QualityFeedback for the host's AIMD bitrate controller.
-    private var feedbackTimer: Timer?
+    private var feedbackTimer: DispatchSourceTimer?
+    private var recoveryTimer: DispatchSourceTimer?
+    private var receiveBytes: UInt64 = 0
     private var lastFeedbackBytes: UInt64 = 0
     private var lastFeedbackDiscarded: UInt64 = 0
     private var lastFeedbackFrames: UInt64 = 0
+    private var lastFeedbackFragments: UInt64 = 0
+    private var lastFeedbackLostFragments: UInt64 = 0
+    private var lastFeedbackTime: TimeInterval = 0
 
     // Auto-reconnect with exponential backoff
     private var reconnectTask: Task<Void, Never>?
@@ -270,8 +281,8 @@ public final class StreamSession: ObservableObject {
             pipelineLock.lock()
             skippingUntilKeyframe = true
             consecutiveLaggedFrames = 0
-            pipelineLock.unlock()
             requestKeyframe()
+            pipelineLock.unlock()
         }
     }
 
@@ -355,7 +366,7 @@ public final class StreamSession: ObservableObject {
                 self.stats.framesDecoded += UInt64(n)
             }
         }
-        // .common keeps stats/ping/feedback alive during UI tracking
+        // .common keeps stats/ping alive during UI tracking
         // (drags/scrolls park .default-mode timers).
         RunLoop.main.add(timer, forMode: .common)
         fpsTimer = timer
@@ -450,6 +461,10 @@ public final class StreamSession: ObservableObject {
         correlateHostTiming(captureUs: frame.timestampUs)
 
         if isDecodePaused { return }
+        if frame.isKeyframe {
+            nextKeyframeRequestTime = 0
+            keyframeRetryInterval = 0
+        }
 
         // Monotonic clock: CFAbsoluteTime is wall time and NTP steps
         // would permanently poison the lag baseline (a backwards step
@@ -507,70 +522,123 @@ public final class StreamSession: ObservableObject {
             try decoder.decode(annexB: frame.data, timestampUs: frame.timestampUs)
         } catch {
             print("[StreamSession] decode error: \(error)")
+            skippingUntilKeyframe = true
+            requestKeyframe()
         }
     }
 
-    /// If the reassembler discarded an incomplete frame since we last
-    /// looked, ask the host for a keyframe (recovery in ~1 RTT instead
-    /// of waiting out the keyframe interval). At most one request per
-    /// 250 ms.
-    private func requestKeyframeIfLossDetected() {
+    /// Check before decoding the next frame: its references may include
+    /// a partially or wholly lost predecessor. Called under pipelineLock.
+    private func requestKeyframeIfLossDetected(recoveredByKeyframe: Bool = false) {
         let discarded = reassembler.discarded
         guard discarded > lastSeenDiscarded else { return }
         lastSeenDiscarded = discarded
+        guard !recoveredByKeyframe else { return }
+        skippingUntilKeyframe = true
         print("[StreamSession] frame lost (discards=\(discarded), FEC recoveries=\(reassembler.recovered)) — requesting keyframe")
         requestKeyframe()
     }
 
-    /// Single funnel (and rate limit) for keyframe requests from both
-    /// the loss detector and the lag watchdog.
+    /// One backoff for loss, decode errors and the lag watchdog. The
+    /// receive timer retries even when the host sends no more video.
+    /// Called under pipelineLock.
     private func requestKeyframe() {
-        let now = CFAbsoluteTimeGetCurrent()
-        guard now - lastKeyframeRequestSent >= 0.25 else { return }
-        lastKeyframeRequestSent = now
-        sendControl(.requestKeyframe)
+        let now = ProcessInfo.processInfo.systemUptime
+        guard let conn = receiveConnection, now >= nextKeyframeRequestTime else { return }
+        sendReceiveControl(.requestKeyframe, on: conn)
+        let initial = min(1.0, max(0.1, Double(receiveRttMs) / 1000.0))
+        keyframeRetryInterval = keyframeRetryInterval == 0 ? initial : min(1.0, keyframeRetryInterval * 2)
+        nextKeyframeRequestTime = now + keyframeRetryInterval
     }
 
     private func startFeedbackLoop() {
-        feedbackTimer?.invalidate()
-        lastFeedbackBytes = stats.bytesReceived
+        stopFeedbackLoop()
+        guard let conn = pixelConnection else { return }
+        pipelineLock.lock()
+        receiveConnection = conn
+        lastFeedbackBytes = receiveBytes
         lastFeedbackDiscarded = reassembler.discarded
-        lastFeedbackFrames = stats.framesReceived
-        let timer = Timer(timeInterval: 2.0, repeats: true) { [weak self] timer in
-            guard let self else { timer.invalidate(); return }
-            Task { @MainActor [weak self] in
-                guard let self, self.state == .connected else { return }
-                let bytes = self.stats.bytesReceived
-                let deliveredNow = self.reassembler.delivered
-                let discards = self.reassembler.discarded
-                let dBytes = bytes &- self.lastFeedbackBytes
-                let dDelivered = deliveredNow &- self.lastFeedbackFrames
-                let dDiscards = discards &- self.lastFeedbackDiscarded
-                self.lastFeedbackBytes = bytes
-                self.lastFeedbackFrames = deliveredNow
-                self.lastFeedbackDiscarded = discards
+        lastFeedbackFrames = reassembler.delivered
+        lastFeedbackFragments = reassembler.totalDataFragments
+        lastFeedbackLostFragments = reassembler.lostDataFragments
+        lastFeedbackTime = ProcessInfo.processInfo.systemUptime
+        // Advertise FEC support before starting to drain the first IDR.
+        sendReceiveControl(.qualityFeedback(rttMs: receiveRttMs, lossPct: 0,
+                                           bandwidthKbps: 0, rawLossPct: 0), on: conn)
+        pipelineLock.unlock()
 
-                // True frame-loss ratio: lost / (lost + delivered).
-                // (The old datagram denominator diluted loss ~10-25×,
-                // leaving the host's AIMD controller effectively blind.)
-                let lossPct: Float = (dDiscards + dDelivered) > 0
-                    ? Float(dDiscards) / Float(dDiscards + dDelivered) * 100.0
-                    : 0
-                let bandwidthKbps = UInt32(dBytes * 8 / 2 / 1000)
-                self.sendControl(.qualityFeedback(
-                    rttMs: UInt32(self.rttMs ?? 0),
-                    lossPct: lossPct,
-                    bandwidthKbps: bandwidthKbps
-                ))
-            }
+        let timer = DispatchSource.makeTimerSource(queue: receiveQueue)
+        timer.schedule(deadline: .now() + 0.25, repeating: 0.25)
+        timer.setEventHandler { [weak self, weak conn] in
+            guard let self, let conn else { return }
+            self.pipelineLock.lock()
+            defer { self.pipelineLock.unlock() }
+            guard self.receiveConnection === conn else { return }
+            self.sendQualityFeedback(on: conn)
         }
-        RunLoop.main.add(timer, forMode: .common)
         feedbackTimer = timer
+        timer.resume()
+
+        let recovery = DispatchSource.makeTimerSource(queue: receiveQueue)
+        recovery.schedule(deadline: .now() + 0.02, repeating: 0.02)
+        recovery.setEventHandler { [weak self, weak conn] in
+            guard let self, let conn else { return }
+            self.pipelineLock.lock()
+            defer { self.pipelineLock.unlock() }
+            guard self.receiveConnection === conn else { return }
+            self.reassembler.expireStalledFrames(timeout: max(0.06, Double(self.receiveRttMs) / 500.0))
+            self.requestKeyframeIfLossDetected()
+            if self.skippingUntilKeyframe && !self.isDecodePaused { self.requestKeyframe() }
+        }
+        recoveryTimer = recovery
+        recovery.resume()
+    }
+
+    /// Receive-side counters and actual elapsed time avoid HUD flush lag
+    /// and the old datagram/delivered-frame baseline mismatch on reconnect.
+    private func sendQualityFeedback(on conn: NWConnection) {
+        let now = ProcessInfo.processInfo.systemUptime
+        let elapsed = max(0.001, now - lastFeedbackTime)
+        let dBytes = receiveBytes &- lastFeedbackBytes
+        let dDelivered = reassembler.delivered &- lastFeedbackFrames
+        let dDiscards = reassembler.discarded &- lastFeedbackDiscarded
+        let dFragments = reassembler.totalDataFragments &- lastFeedbackFragments
+        let dLostFragments = reassembler.lostDataFragments &- lastFeedbackLostFragments
+        lastFeedbackTime = now
+        lastFeedbackBytes = receiveBytes
+        lastFeedbackFrames = reassembler.delivered
+        lastFeedbackDiscarded = reassembler.discarded
+        lastFeedbackFragments = reassembler.totalDataFragments
+        lastFeedbackLostFragments = reassembler.lostDataFragments
+        let lossPct: Float = dDiscards + dDelivered > 0
+            ? Float(dDiscards) / Float(dDiscards + dDelivered) * 100 : 0
+        let rawLossPct: Float = dFragments > 0
+            ? Float(dLostFragments) / Float(dFragments) * 100 : 0
+        let kbps = min(Double(UInt32.max), Double(dBytes) * 8 / elapsed / 1000)
+        sendReceiveControl(.qualityFeedback(rttMs: receiveRttMs, lossPct: lossPct,
+                                           bandwidthKbps: UInt32(kbps), rawLossPct: rawLossPct), on: conn)
+    }
+
+    private func sendReceiveControl(_ message: ControlMessage, on conn: NWConnection) {
+        guard let json = message.toJSON() else { return }
+        var packet = Data([Self.typeControl])
+        packet.append(json)
+        conn.send(content: packet, completion: .contentProcessed { error in
+            if let error { print("[StreamSession] receive control send error: \(error)") }
+        })
     }
 
     private func stopFeedbackLoop() {
-        feedbackTimer?.invalidate()
+        feedbackTimer?.cancel()
         feedbackTimer = nil
+        recoveryTimer?.cancel()
+        recoveryTimer = nil
+        pipelineLock.lock()
+        receiveConnection = nil
+        receiveRttMs = 0
+        nextKeyframeRequestTime = 0
+        keyframeRetryInterval = 0
+        pipelineLock.unlock()
     }
 
     private func scheduleReconnect() {
@@ -654,6 +722,9 @@ public final class StreamSession: ObservableObject {
                   let sent = self.pendingPingTime else { return }
             let rtt = (CFAbsoluteTimeGetCurrent() - sent) * 1000
             self.rttMs = Int(rtt.rounded())
+            self.pipelineLock.lock()
+            self.receiveRttMs = UInt32(clamping: self.rttMs ?? 0)
+            self.pipelineLock.unlock()
             self.pendingPingNonce = nil
             self.pendingPingTime = nil
         }
@@ -710,9 +781,11 @@ public final class StreamSession: ObservableObject {
                         self.onResolvedEndpoint?("\(h)", p.rawValue)
                     }
                 case .failed(let error):
+                    self.stopFeedbackLoop()
                     self.state = .failed(error.localizedDescription)
                     self.scheduleReconnect()
                 case .waiting(let error):
+                    self.stopFeedbackLoop()
                     // Host unreachable (refused, no route). NWConnection
                     // parks here and only retries on a network-path
                     // change — not when the host comes back — so the
@@ -722,6 +795,7 @@ public final class StreamSession: ObservableObject {
                     self.state = .failed(error.localizedDescription)
                     self.scheduleReconnect()
                 case .cancelled:
+                    self.stopFeedbackLoop()
                     self.state = .disconnected
                 default:
                     break
@@ -729,7 +803,7 @@ public final class StreamSession: ObservableObject {
             }
         }
 
-        conn.start(queue: .global(qos: .userInteractive))
+        conn.start(queue: receiveQueue)
     }
 
     /// Reset the decode pipeline (decoder + reassembler) so new frames
@@ -745,6 +819,9 @@ public final class StreamSession: ObservableObject {
         reassembler.reset()
         lagBaselineUs = nil
         skippingUntilKeyframe = false
+        nextKeyframeRequestTime = 0
+        keyframeRetryInterval = 0
+        lastSeenDiscarded = reassembler.discarded
         consecutiveLaggedFrames = 0
         frameTimings.removeAll()
         frameTimingOrder.removeAll()
@@ -937,11 +1014,15 @@ public final class StreamSession: ObservableObject {
         // data. receive() captures both.
         conn.receive(minimumIncompleteLength: 1, maximumLength: 65535) { [weak self] data, context, isComplete, error in
             guard let self = self else { return }
+            self.pipelineLock.lock()
+            defer { self.pipelineLock.unlock() }
+            guard self.receiveConnection === conn else { return }
 
             if let error = error {
                 print("[StreamSession] receive error: \(error)")
                 Task { @MainActor [weak self] in
                     guard let self, conn === self.pixelConnection else { return }
+                    self.stopFeedbackLoop()
                     self.state = .failed(error.localizedDescription)
                     // The state handler doesn't always see a .failed
                     // transition for receive-side errors; without this
@@ -966,6 +1047,7 @@ public final class StreamSession: ObservableObject {
             self.lastReceiveTime = CFAbsoluteTimeGetCurrent()
             self.pendingRecvBytes &+= UInt64(data.count)
             self.pendingRecvCount &+= 1
+            self.receiveBytes &+= UInt64(data.count)
             let nowAbs = CFAbsoluteTimeGetCurrent()
             if nowAbs - self.lastStatsFlush >= 0.5 {
                 self.lastStatsFlush = nowAbs
@@ -974,8 +1056,9 @@ public final class StreamSession: ObservableObject {
                 self.pendingRecvBytes = 0
                 self.pendingRecvCount = 0
                 Task { @MainActor [weak self] in
-                    self?.stats.framesReceived += count
-                    self?.stats.bytesReceived += bytes
+                    guard let self, conn === self.pixelConnection else { return }
+                    self.stats.framesReceived += count
+                    self.stats.bytesReceived += bytes
                 }
             }
 
@@ -989,12 +1072,11 @@ public final class StreamSession: ObservableObject {
                 // Video fragment — pass full datagram (including type byte)
                 // to the reassembler.
                 // Serialised against resetDecodePipeline() (main thread).
-                self.pipelineLock.lock()
-                if let frame = self.reassembler.push(data) {
+                let frame = self.reassembler.push(data)
+                self.requestKeyframeIfLossDetected(recoveredByKeyframe: frame?.isKeyframe ?? false)
+                if let frame {
                     self.handleCompletedFrame(frame)
                 }
-                self.requestKeyframeIfLossDetected()
-                self.pipelineLock.unlock()
             }
 
             // Continue draining.

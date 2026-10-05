@@ -40,7 +40,7 @@ public enum ControlMessage {
     case requestKeyframe
     /// Periodic receiver-side quality report; feeds the host's AIMD
     /// bitrate controller.
-    case qualityFeedback(rttMs: UInt32, lossPct: Float, bandwidthKbps: UInt32)
+    case qualityFeedback(rttMs: UInt32, lossPct: Float, bandwidthKbps: UInt32, rawLossPct: Float? = nil)
     /// Viewer-driven stream quality settings. nil fields are left
     /// unchanged on the host. Bitrate applies live; fps/maxDimension
     /// restart the host capture pipeline (brief interruption).
@@ -94,11 +94,12 @@ public enum ControlMessage {
         case .requestDisplayThumbnails:
             // Unit variant in serde = bare string
             return "\"RequestDisplayThumbnails\"".data(using: .utf8)
-        case .qualityFeedback(let rttMs, let lossPct, let bandwidthKbps):
+        case .qualityFeedback(let rttMs, let lossPct, let bandwidthKbps, let rawLossPct):
             dict = ["QualityFeedback": [
                 "rtt_ms": rttMs,
                 "loss_pct": lossPct,
                 "bandwidth_kbps": bandwidthKbps,
+                "raw_loss_pct": rawLossPct.map { $0 as Any } ?? NSNull(),
             ]]
         case .setStreamSettings(let fps, let bitrateKbps, let maxDimension):
             var fields: [String: Any] = [:]
