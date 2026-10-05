@@ -84,6 +84,7 @@ final class ExternalDisplayController: ObservableObject {
     /// The monitor's own connection to the host. Long-lived; connected
     /// and disconnected as the monitor / iPad session come and go.
     let monitorSession = StreamSession()
+    private let controlRepeater = ControlMessageRepeater()
 
     /// The display the iPad session is showing — the monitor defaults
     /// to a different one.
@@ -255,7 +256,9 @@ final class ExternalDisplayController: ObservableObject {
         monitorDisplayID = id
         guard monitorSession.state == .connected else { return }
         monitorSession.resetDecodePipeline()
-        monitorSession.sendControl(.setActiveDisplay(displayId: id))
+        controlRepeater.send(.setActiveDisplay(displayId: id)) { [weak monitorSession] in
+            monitorSession?.sendControl($0)
+        }
     }
 
     /// The host turned the monitor stream away; stay down until retry.
@@ -278,6 +281,7 @@ final class ExternalDisplayController: ObservableObject {
         guard isMonitorConnected,
               let primary, primary.state == .connected,
               !isParked else {
+            controlRepeater.cancelAll()
             livenessTask?.cancel()
             hasBeenLive = false
             if monitorSession.state != .disconnected { monitorSession.disconnect() }
@@ -294,6 +298,7 @@ final class ExternalDisplayController: ObservableObject {
     }
 
     private func monitorStateChanged(_ state: StreamSession.ConnectionState) {
+        if state != .connected { controlRepeater.cancelAll() }
         // Ignore stale deliveries after we've already stood down.
         guard !isParked, isActive,
               monitorSession.state != .disconnected else { return }
@@ -339,6 +344,7 @@ final class ExternalDisplayController: ObservableObject {
     /// backoff loop is stopped; the iPad session is a separate
     /// connection and is untouched.
     private func park(_ verdict: MonitorStatus) {
+        controlRepeater.cancelAll()
         livenessTask?.cancel()
         hasBeenLive = false
         status = verdict
@@ -375,7 +381,9 @@ final class ExternalDisplayController: ObservableObject {
         let id = resolveMonitorDisplay(in: displays)
         monitorDisplayID = id
         monitorSession.resetDecodePipeline()
-        monitorSession.sendControl(.setActiveDisplay(displayId: id))
+        controlRepeater.send(.setActiveDisplay(displayId: id)) { [weak monitorSession] in
+            monitorSession?.sendControl($0)
+        }
     }
 
     /// Keep the current choice if the host still has it; otherwise

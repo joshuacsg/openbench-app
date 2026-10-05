@@ -701,11 +701,7 @@ public final class InputCaptureView: UIView, UIKeyInput, UIPointerInteractionDel
                 // Carry the chord modifiers (1=Shift 2=Ctrl 4=Alt
                 // 8=Cmd) so the host stamps the right CGEventFlags —
                 // ⌘C from a Magic Keyboard works end-to-end now.
-                inputManager?.sendControl?(.keyEvent(
-                    key: name,
-                    modifiers: modifierBits(key.modifierFlags),
-                    pressed: true
-                ))
+                inputManager?.keyDown(name, modifiers: modifierBits(key.modifierFlags))
             }
         }
         // Don't call super — we consume the events.
@@ -714,11 +710,7 @@ public final class InputCaptureView: UIView, UIKeyInput, UIPointerInteractionDel
     public override func pressesEnded(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
         for press in presses {
             if let key = press.key, let name = uiKeyToName(key) {
-                inputManager?.sendControl?(.keyEvent(
-                    key: name,
-                    modifiers: modifierBits(key.modifierFlags),
-                    pressed: false
-                ))
+                inputManager?.keyUp(name, modifiers: modifierBits(key.modifierFlags))
             }
         }
     }
