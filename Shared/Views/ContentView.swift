@@ -210,6 +210,27 @@ struct GlassButtonStyle: ButtonStyle {
 
 /// Video stream view — connects to the host, decodes HEVC, renders
 /// decoded frames via Metal, and captures input.
+/// The gear menu, isolated from StreamView's per-tick re-renders. StreamView
+/// observes the session (stats ~2 Hz, rtt, thumbnails); rebuilding the Menu
+/// with a fresh closure each time made its open list flicker and drop taps.
+/// Holding the session unobserved and comparing by identity means only the
+/// menu's own @AppStorage changes redraw it.
+private struct StreamSettingsMenu: View, Equatable {
+    let session: StreamSession
+
+    static func == (lhs: Self, rhs: Self) -> Bool { lhs.session === rhs.session }
+
+    var body: some View {
+        StreamSettingsView { fps, bitrateKbps, maxDimension in
+            session.sendControl(.setStreamSettings(
+                fps: fps,
+                bitrateKbps: bitrateKbps,
+                maxDimension: maxDimension
+            ))
+        }
+    }
+}
+
 struct StreamView: View {
     let host: FluxHost
     var onDisconnect: (() -> Void)?
@@ -837,13 +858,7 @@ struct StreamView: View {
 
     /// Stream quality menu (resolution / fps / bitrate).
     private var streamSettingsButton: some View {
-        StreamSettingsView { fps, bitrateKbps, maxDimension in
-            session.sendControl(.setStreamSettings(
-                fps: fps,
-                bitrateKbps: bitrateKbps,
-                maxDimension: maxDimension
-            ))
-        }
+        StreamSettingsMenu(session: session).equatable()
     }
 
     /// External monitor menu (display it shows + iPad mode), only while
