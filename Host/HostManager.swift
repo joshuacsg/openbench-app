@@ -409,7 +409,9 @@ final class HostManager: ObservableObject {
     // MARK: - Binary discovery
 
     private func findFluxHostBinary() -> String? {
-        let candidates = [
+        let candidates: [String?] = [
+            // Embedded in the app (Contents/MacOS) — the notarized DMG build
+            Bundle.main.url(forAuxiliaryExecutable: "flux-host")?.path,
             // Alongside the app bundle
             Bundle.main.bundlePath + "/../flux-host",
             // In the flux repo (development)
@@ -419,7 +421,7 @@ final class HostManager: ObservableObject {
             "/usr/local/bin/flux-host",
             "/opt/homebrew/bin/flux-host",
         ]
-        for path in candidates {
+        for path in candidates.compactMap({ $0 }) {
             if FileManager.default.isExecutableFile(atPath: path) {
                 return path
             }

@@ -86,6 +86,21 @@ Success prints `Upload succeeded.`, `Uploaded FastPort`, and
 `** EXPORT SUCCEEDED **`. The build then takes a few minutes to finish
 processing in App Store Connect before it appears in TestFlight.
 
+## Build the FastPort Host DMG (notarized, not TestFlight)
+
+The macOS Host can't go through TestFlight / the Mac App Store (no sandbox,
+input injection, private `CGVirtualDisplay`). It ships as a Developer ID-signed,
+notarized DMG with `flux-host` embedded in `Contents/MacOS`:
+
+```bash
+./Scripts/build-host-dmg.sh            # → build/host-dmg/FastPort-Host-<version>.dmg
+```
+
+Needs a **Developer ID Application** certificate and a `fastport-notary`
+notarytool keychain profile — setup steps are in `--help`. For a local,
+un-notarized test build:
+`SIGN_IDENTITY="Apple Development: …" ./Scripts/build-host-dmg.sh --skip-notarize`.
+
 ## Gotchas
 - **Don't pipe a build/error count through `grep -c` in an `&&` chain** —
   `grep -c` exits non-zero when the count is 0, which silently aborts the
@@ -96,3 +111,8 @@ processing in App Store Connect before it appears in TestFlight.
   the App Store, and is gated behind macOS Accessibility permission.
 - Never use private Apple APIs (e.g. SkyLight `SLS*`) in shipped code — App
   Store rejection and runtime instability.
+  **One owner-approved exception (2026-10-06):** `flux-host` (direct
+  distribution, never the App Store) synthesizes Magic Trackpad gestures with
+  undocumented CGEvent fields plus SkyLight `SLEventSetIOHIDEvent`, resolved at
+  runtime via `dlsym` (see `flux/crates/flux-input/src/gesture.rs`). The iOS
+  app stays on public APIs.
