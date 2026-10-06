@@ -637,6 +637,7 @@ struct StreamView: View {
                 canvasSize: session.canvasSize,
                 showKeyboard: showKeyboard,
                 trackpadMode: trackpadMode,
+                trackpadGestures: session.trackpadGestures,
                 viewportScale: viewportScale,
                 viewportOffset: viewportOffset,
                 onPointerMoved: { pt in cursor.position = pt },
@@ -1087,6 +1088,7 @@ struct InputCaptureViewRepresentable: UIViewRepresentable {
     let canvasSize: CGSize
     var showKeyboard: Bool = false
     var trackpadMode: Bool = false
+    var trackpadGestures: Bool = false
     var viewportScale: CGFloat = 1.0
     var viewportOffset: CGPoint = .zero
     var constrainTrackpadToCanvas: Bool = false
@@ -1101,6 +1103,7 @@ struct InputCaptureViewRepresentable: UIViewRepresentable {
         view.constrainTrackpadToCanvas = constrainTrackpadToCanvas
         view.showKeyboard = showKeyboard
         view.trackpadMode = trackpadMode
+        view.trackpadGestures = trackpadGestures
         view.onPointerMoved = onPointerMoved
         view.onCanvasPointerMoved = onCanvasPointerMoved
         view.onViewportChanged = onViewportChanged
@@ -1114,6 +1117,7 @@ struct InputCaptureViewRepresentable: UIViewRepresentable {
         view.showKeyboard = showKeyboard
         view.constrainTrackpadToCanvas = constrainTrackpadToCanvas
         view.trackpadMode = trackpadMode
+        view.trackpadGestures = trackpadGestures
         view.onPointerMoved = onPointerMoved
         view.onCanvasPointerMoved = onCanvasPointerMoved
         view.onViewportChanged = onViewportChanged

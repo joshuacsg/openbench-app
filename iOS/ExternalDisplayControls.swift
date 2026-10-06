@@ -138,6 +138,7 @@ struct ExternalTrackpadSurface: View {
                 canvasSize: controller.monitorSession.canvasSize,
                 showKeyboard: showKeyboard,
                 trackpadMode: true,
+                trackpadGestures: controller.monitorSession.trackpadGestures,
                 constrainTrackpadToCanvas: true,
                 onCanvasPointerMoved: { pt in
                     // Keep the cursor up during two-finger scrolls (the

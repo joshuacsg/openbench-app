@@ -53,6 +53,7 @@ public final class StreamSession: ObservableObject {
     /// Used by the input capture views to map screen coordinates →
     /// canvas pixel coordinates.
     @Published public var canvasSize: CGSize = .zero
+    @Published public var trackpadGestures = false
 
     /// Displays available on the host, populated from the Welcome message.
     @Published public var availableDisplays: [DisplayInfo] = []
@@ -1111,6 +1112,7 @@ public final class StreamSession: ObservableObject {
             let cw = (layout?["canvas_width"]  as? CGFloat) ?? (fields["canvas_width"]  as? CGFloat) ?? 0
             let ch = (layout?["canvas_height"] as? CGFloat) ?? (fields["canvas_height"] as? CGFloat) ?? 0
             Task { @MainActor [weak self] in
+                self?.trackpadGestures = fields["trackpad_gestures"] as? Bool ?? false
                 if cw > 0 && ch > 0 {
                     self?.canvasSize = CGSize(width: cw, height: ch)
                 }

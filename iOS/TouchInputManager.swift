@@ -111,6 +111,7 @@ public final class InputCaptureView: UIView, UIKeyInput, UIPointerInteractionDel
     public var trackpadMode: Bool = false {
         didSet {
             guard trackpadMode != oldValue else { return }
+            resetTrackpadGestures(sendCancellation: trackpadGestures && oldValue)
             if trackpadMode {
                 if !trackpadCursorInitialized {
                     trackpadCursor = CGPoint(x: bounds.midX, y: bounds.midY)
@@ -121,6 +122,35 @@ public final class InputCaptureView: UIView, UIKeyInput, UIPointerInteractionDel
                 reportPointer(nil)
             }
         }
+    }
+
+    public var trackpadGestures = false {
+        didSet {
+            guard trackpadGestures != oldValue else { return }
+            if !trackpadGestures { inputManager?.cancelPendingTrackpadControls() }
+            resetTrackpadGestures(sendCancellation: false)
+        }
+    }
+
+    private var gestureClassifier = TrackpadGestureClassifier()
+    private var multiFingerSequence = false
+    private var secondaryTapRecognizer: UITapGestureRecognizer?
+    private var rightClickWork: DispatchWorkItem?
+    private var indirectScrollActive = false
+
+    private var usesTrackpadGestures: Bool { trackpadMode && trackpadGestures }
+
+    private func resetTrackpadGestures(sendCancellation: Bool) {
+        if sendCancellation {
+            emitTrackpadActions(gestureClassifier.cancel(at: ProcessInfo.processInfo.systemUptime, size: bounds.size))
+            if indirectScrollActive { inputManager?.trackpadScroll(dx: 0, dy: 0, phase: .cancelled) }
+        }
+        rightClickWork?.cancel()
+        rightClickWork = nil
+        gestureClassifier = TrackpadGestureClassifier()
+        multiFingerSequence = false
+        indirectScrollActive = false
+        secondaryTapRecognizer?.isEnabled = !usesTrackpadGestures
     }
 
     // MARK: - Setup
@@ -144,6 +174,7 @@ public final class InputCaptureView: UIView, UIKeyInput, UIPointerInteractionDel
         let secondaryTap = UITapGestureRecognizer(target: self, action: #selector(handleSecondaryTap(_:)))
         secondaryTap.numberOfTouchesRequired = 2
         addGestureRecognizer(secondaryTap)
+        secondaryTapRecognizer = secondaryTap
 
         // Hover gesture for pointer movement without click.
         let hover = UIHoverGestureRecognizer(target: self, action: #selector(handleHover(_:)))
@@ -193,6 +224,8 @@ public final class InputCaptureView: UIView, UIKeyInput, UIPointerInteractionDel
             return
         }
 
+        if handleTrackpadGestures(touches, event: event) { return }
+
         // Count all active direct (finger) touches on this view.
         let directTouches = event?.touches(for: self)?.filter { $0.type == .direct } ?? []
 
@@ -236,6 +269,8 @@ public final class InputCaptureView: UIView, UIKeyInput, UIPointerInteractionDel
             return
         }
 
+        if handleTrackpadGestures(touches, event: event) { return }
+
         let directTouches = event?.touches(for: self)?.filter { $0.type == .direct } ?? []
 
         // Two-finger direct touch → scroll via midpoint delta.
@@ -276,6 +311,8 @@ public final class InputCaptureView: UIView, UIKeyInput, UIPointerInteractionDel
             return
         }
 
+        if handleTrackpadGestures(touches, event: event) { return }
+
         // Check remaining active direct touches.
         let remaining = event?.touches(for: self)?
             .filter { $0.type == .direct && $0.phase != .ended && $0.phase != .cancelled } ?? []
@@ -305,6 +342,19 @@ public final class InputCaptureView: UIView, UIKeyInput, UIPointerInteractionDel
     }
 
     public override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+        if usesTrackpadGestures, touches.contains(where: { $0.type == .direct }) {
+            emitTrackpadActions(gestureClassifier.cancel(at: touches.first?.timestamp ?? 0, size: bounds.size))
+            rightClickWork?.cancel()
+            // UIKit cancels the sequence; never turn a remaining finger
+            // into a new single-finger tap or resume a previous drag.
+            multiFingerSequence = event?.touches(for: self)?.contains(where: {
+                $0.type == .direct && $0.phase != .ended && $0.phase != .cancelled
+            }) ?? false
+            trackpadDragging = false
+            dragLockArmed = false
+            trackpadLastPoint = nil
+            lastTapEndTime = 0
+        }
         inputManager?.mouseButton(0, pressed: false)
         pointerButtonDown = false
         directScrollActive = false
@@ -312,6 +362,62 @@ public final class InputCaptureView: UIView, UIKeyInput, UIPointerInteractionDel
     }
 
     // MARK: - Trackpad mode (relative cursor)
+
+    /// Returns true while a multi-finger sequence owns the touch stream,
+    /// including its last remaining finger (which must not move/click).
+    private func handleTrackpadGestures(_ touches: Set<UITouch>, event: UIEvent?) -> Bool {
+        guard usesTrackpadGestures else { return false }
+        guard touches.contains(where: { $0.type == .direct }) else {
+            return multiFingerSequence || indirectScrollActive
+        }
+        let all = event?.touches(for: self)?.filter { $0.type == .direct } ?? Array(touches)
+        let active = all.filter { $0.phase != .ended && $0.phase != .cancelled }
+        let lifted = touches.filter { $0.type == .direct && ($0.phase == .ended || $0.phase == .cancelled) }
+        let time = touches.map(\.timestamp).max() ?? 0
+        func snapshot(_ touch: UITouch) -> TrackpadGestureClassifier.Touch {
+            .init(id: ObjectIdentifier(touch).hashValue, point: touch.location(in: self))
+        }
+        if (active.count >= 2 || indirectScrollActive) && !multiFingerSequence {
+            multiFingerSequence = true
+            inputManager?.mouseButton(0, pressed: false)
+            trackpadDragging = false
+            dragLockArmed = false
+            trackpadLastPoint = nil
+            trackpadGestureOrigin = nil
+            lastTapEndTime = 0
+        }
+        emitTrackpadActions(gestureClassifier.update(active.map(snapshot), lifted: lifted.map(snapshot),
+                                                     at: time, size: bounds.size))
+        rightClickWork?.cancel()
+        if let deadline = gestureClassifier.rightClickDeadline {
+            let work = DispatchWorkItem { [weak self] in
+                guard let self, self.usesTrackpadGestures else { return }
+                self.emitTrackpadActions(self.gestureClassifier.flush(at: deadline))
+            }
+            rightClickWork = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + max(0, deadline - time), execute: work)
+        }
+        let handled = multiFingerSequence
+        if active.isEmpty { multiFingerSequence = false }
+        return handled
+    }
+
+    private func emitTrackpadActions(_ actions: [TrackpadGestureClassifier.Action]) {
+        for action in actions {
+            switch action {
+            case .scroll(let phase, let dx, let dy, let vx, let vy):
+                inputManager?.trackpadScroll(dx: dx, dy: dy, phase: phase, vx: vx, vy: vy)
+            case .gesture(let kind, let phase, let delta, let velocity):
+                inputManager?.trackpadGesture(kind, phase: phase, delta: delta, velocity: velocity)
+            case .rightClick:
+                inputManager?.mouseButton(1, pressed: true)
+                inputManager?.mouseButton(1, pressed: false)
+            case .lookUp:
+                inputManager?.keyDown("d", modifiers: 10)
+                inputManager?.keyUp("d", modifiers: 10)
+            }
+        }
+    }
 
     private func trackpadTouchBegan(_ touch: UITouch) {
         if !trackpadCursorInitialized {
@@ -432,7 +538,8 @@ public final class InputCaptureView: UIView, UIKeyInput, UIPointerInteractionDel
 
     /// Trackpad hover (pointer movement without click).
     @objc private func handleHover(_ gesture: UIHoverGestureRecognizer) {
-        guard gesture.state == .changed || gesture.state == .began else { return }
+        guard !(usesTrackpadGestures && (multiFingerSequence || indirectScrollActive)),
+              gesture.state == .changed || gesture.state == .began else { return }
         let viewPt = gesture.location(in: self)
         let pos = mapToCanvas(viewPt)
         inputManager?.mouseMove(x: Int32(pos.x), y: Int32(pos.y))
@@ -444,13 +551,37 @@ public final class InputCaptureView: UIView, UIKeyInput, UIPointerInteractionDel
         let translation = gesture.translation(in: self)
         // Reset so we get deltas, not cumulative offset.
         gesture.setTranslation(.zero, in: self)
-        inputManager?.scroll(dx: Double(translation.x) * 0.5, dy: Double(translation.y) * 0.5)
+        if usesTrackpadGestures {
+            switch gesture.state {
+            case .began, .changed:
+                guard translation != .zero else { return }
+                if !indirectScrollActive {
+                    inputManager?.mouseButton(0, pressed: false)
+                    pointerButtonDown = false
+                }
+                inputManager?.trackpadScroll(dx: Double(translation.x), dy: Double(translation.y),
+                                             phase: indirectScrollActive ? .changed : .began)
+                indirectScrollActive = true
+            case .ended, .cancelled, .failed:
+                guard indirectScrollActive else { return }
+                let velocity = gesture.velocity(in: self)
+                let phase: TrackpadPhase = gesture.state == .ended ? .ended : .cancelled
+                inputManager?.trackpadScroll(dx: Double(translation.x), dy: Double(translation.y), phase: phase,
+                                             vx: Double(velocity.x), vy: Double(velocity.y))
+                indirectScrollActive = false
+            default:
+                break
+            }
+        } else {
+            inputManager?.scroll(dx: Double(translation.x) * 0.5, dy: Double(translation.y) * 0.5)
+        }
     }
 
     /// Two-finger tap → right click. In trackpad mode the click lands at
     /// the tracked cursor (not the fingers); in touchscreen mode it
     /// lands where the fingers tapped.
     @objc private func handleSecondaryTap(_ gesture: UITapGestureRecognizer) {
+        guard !usesTrackpadGestures else { return }
         let pos = trackpadMode
             ? mapToCanvas(trackpadCursor)
             : mapToCanvas(gesture.location(in: self))
