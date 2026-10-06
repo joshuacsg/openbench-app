@@ -460,6 +460,9 @@ struct TrackpadGestureClassifier {
         var rotating = false
         var lifting = false
         var tapAllowed = true
+        /// The gesture already ended because a finger lifted; the fingers
+        /// still down are ignored until all of them leave the glass.
+        var draining = false
     }
 
     private var group: Group?
@@ -525,6 +528,11 @@ struct TrackpadGestureClassifier {
         g.samples.append(Sample(time: time, center: center, spread: spread))
         while g.samples.count > 2 && g.samples[1].time <= time - 0.05 { g.samples.removeFirst() }
 
+        if g.draining {
+            group = active.isEmpty ? nil : g
+            return actions
+        }
+
         if newIDs != oldIDs {
             let isLift = newIDs.isSubset(of: oldIDs)
             let isTap = g.tapAllowed && !g.scrolling && g.kind == nil && !g.rotating
@@ -553,10 +561,18 @@ struct TrackpadGestureClassifier {
                 }
                 return actions
             }
-            // Lifting below two fingers ends naturally; replacing/adding
-            // fingers abandons the stream and starts a fresh classification.
-            let phase: TrackpadPhase = isLift && active.count < 2 ? .ended : .cancelled
-            actions += finish(g, phase: phase, time: time, size: size)
+            // Fingers leave the glass one at a time: the first lift ENDS a
+            // started gesture (a cancel would snap Mission Control / a Space
+            // switch back), and the rest stay consumed until all lift, like
+            // a real trackpad. Adding fingers abandons the stream instead.
+            let started = g.kind != nil || g.scrolling || g.rotating
+            if isLift && started {
+                actions += finish(g, phase: .ended, time: time, size: size)
+                g.draining = true
+                group = active.isEmpty ? nil : g
+                return actions
+            }
+            actions += finish(g, phase: isLift ? .ended : .cancelled, time: time, size: size)
             group = active.count >= 2 ? makeGroup(active, time: time) : nil
             if isLift { group?.tapAllowed = false }
             return actions
@@ -931,6 +947,30 @@ private enum TrackpadGestureTests {
             check(true, "Look Up chord uses host key name d and Control|Meta")
         } else { check(false, "Look Up chord") }
         input.cancelPendingControls()
+        // Real fingers leave the glass one at a time. A classified swipe must
+        // END (committing Mission Control / the Space switch), never cancel,
+        // and the fingers still down must not start a new gesture.
+        for (dx, dy, kind) in [(CGFloat(0), CGFloat(-60), TrackpadGestureKind.swipeVertical),
+                               (CGFloat(80), CGFloat(0), TrackpadGestureKind.swipeSpaces)] {
+            var s = TrackpadGestureClassifier()
+            _ = s.update(fingers(3), at: 0, size: size)
+            _ = s.update(fingers(3, x: dx / 2, y: dy / 2), at: 0.02, size: size)
+            _ = s.update(fingers(3, x: dx, y: dy), at: 0.04, size: size)
+            let three = fingers(3, x: dx, y: dy)
+            let firstLift = s.update(Array(three.prefix(2)), lifted: [three[2]], at: 0.05, size: size)
+            check(firstLift.contains { if case .gesture(kind, .ended, _, _) = $0 { return true }; return false }
+                  && !firstLift.contains { if case .gesture(_, .cancelled, _, _) = $0 { return true }; return false },
+                  "\(kind.rawValue): first of three fingers lifting ends the swipe (no cancel)")
+            let drift = fingers(3, x: dx + 30, y: dy + 30)
+            check(s.update(Array(drift.prefix(2)), at: 0.07, size: size).isEmpty,
+                  "\(kind.rawValue): remaining two fingers stay consumed (no scroll/pinch)")
+            check(s.update(Array(drift.prefix(1)), lifted: [drift[1]], at: 0.08, size: size).isEmpty
+                  && s.update([], lifted: [drift[0]], at: 0.09, size: size).isEmpty,
+                  "\(kind.rawValue): later lifts emit nothing")
+            check(!s.update(fingers(2), at: 0.5, size: size).contains { if case .gesture(_, .cancelled, _, _) = $0 { return true }; return false },
+                  "\(kind.rawValue): a fresh touch afterwards starts clean")
+        }
+
         print("All \(passed) trackpad tests passed")
     }
 }
