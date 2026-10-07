@@ -446,16 +446,7 @@ struct StreamView: View {
                         thumbnails: session.displayThumbnails,
                         selectedDisplayID: selectedDisplayID,
                         onSelect: { displayID in
-                            selectedDisplayID = displayID
-                            rememberedDisplay = .some(displayID)
-                            UserDefaults.standard.set(
-                                session.availableDisplays.first(where: { $0.id == displayID })?.name,
-                                forKey: rememberedNameKey
-                            )
-                            session.resetDecodePipeline()
-                            controlRepeater.send(.setActiveDisplay(displayId: displayID)) { [weak session] in
-                                session?.sendControl($0)
-                            }
+                            selectDisplay(displayID)
                             closeDisplaySidebar()
                         },
                         onClose: { closeDisplaySidebar() }
@@ -616,6 +607,26 @@ struct StreamView: View {
         // overlays the stream instead of squeezing the video into the
         // space above it.
         .ignoresSafeArea(.keyboard)
+    }
+
+    /// Point the iPad's stream at a host display (nil = All Displays)
+    /// and remember it for this host.
+    private func selectDisplay(_ displayID: UInt32?) {
+        selectedDisplayID = displayID
+        rememberedDisplay = .some(displayID)
+        UserDefaults.standard.set(
+            session.availableDisplays.first(where: { $0.id == displayID })?.name,
+            forKey: rememberedNameKey
+        )
+#if canImport(UIKit)
+        // Set now, not via onChange, so the external display menu's
+        // snapshot in this same render already marks it.
+        external.iPadDisplayID = displayID
+#endif
+        session.resetDecodePipeline()
+        controlRepeater.send(.setActiveDisplay(displayId: displayID)) { [weak session] in
+            session?.sendControl($0)
+        }
     }
 
     /// Video + input capture share the same padded frame so
@@ -862,12 +873,17 @@ struct StreamView: View {
         StreamSettingsMenu(session: session).equatable()
     }
 
-    /// External monitor menu (display it shows + iPad mode), only while
+    /// External monitor menu (what the monitor and iPad show), only while
     /// a monitor is attached.
     @ViewBuilder private var externalDisplayButton: some View {
 #if canImport(UIKit)
         if external.isMonitorConnected {
-            ExternalDisplayMenu(controller: external)
+            ExternalDisplayMenu(
+                controller: external,
+                state: .init(external),
+                onSelectIPadDisplay: { selectDisplay($0) }
+            )
+            .equatable()
         }
 #endif
     }

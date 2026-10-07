@@ -53,6 +53,29 @@ final class ExternalDisplayController: ObservableObject {
         }
     }
 
+    /// Clockwise rotation applied to the monitor's picture, for a monitor
+    /// mounted on its side or upside down (iPadOS can't rotate an
+    /// external display itself).
+    enum MonitorRotation: Int, CaseIterable, Identifiable {
+        case none = 0
+        case clockwise90 = 90
+        case upsideDown = 180
+        case clockwise270 = 270
+
+        var id: Int { rawValue }
+        var degrees: Double { Double(rawValue) }
+        /// Width and height swap on screen.
+        var isQuarterTurn: Bool { self == .clockwise90 || self == .clockwise270 }
+        var label: String {
+            switch self {
+            case .none: return "Standard"
+            case .clockwise90: return "90°"
+            case .upsideDown: return "180°"
+            case .clockwise270: return "270°"
+            }
+        }
+    }
+
     enum MonitorStatus: Equatable {
         /// No monitor, or the iPad isn't streaming.
         case idle
@@ -80,6 +103,12 @@ final class ExternalDisplayController: ObservableObject {
         didSet { UserDefaults.standard.set(iPadMode.rawValue, forKey: Self.modeKey) }
     }
     private static let modeKey = "externalDisplay.iPadMode"
+
+    /// Persisted the same way as iPadMode.
+    @Published var monitorRotation: MonitorRotation {
+        didSet { UserDefaults.standard.set(monitorRotation.rawValue, forKey: Self.rotationKey) }
+    }
+    private static let rotationKey = "externalDisplay.rotation"
 
     /// The monitor's own connection to the host. Long-lived; connected
     /// and disconnected as the monitor / iPad session come and go.
@@ -125,6 +154,8 @@ final class ExternalDisplayController: ObservableObject {
     private init() {
         iPadMode = IPadMode(rawValue: UserDefaults.standard.string(forKey: Self.modeKey) ?? "")
             ?? .trackpad
+        monitorRotation = MonitorRotation(rawValue: UserDefaults.standard.integer(forKey: Self.rotationKey))
+            ?? .none
         // Without a distinct SNI, Network.framework would fold this
         // session into the iPad session's QUIC connection (same process,
         // endpoint and parameters) instead of opening a second viewer.
