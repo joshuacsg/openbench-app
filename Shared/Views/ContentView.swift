@@ -466,6 +466,10 @@ struct StreamView: View {
         .onChange(of: selectedDisplayID) { _, id in
             external.iPadDisplayID = id
         }
+        .onChange(of: monitorAttached) { _, attached in
+            // Its button is gone while a monitor is attached.
+            if attached { closeDisplaySidebar() }
+        }
         .onChange(of: monitorDrivesInput) { _, toMonitor in
             // Release any button still held on the session losing
             // input, and skip decoding the iPad's own (hidden) video
@@ -675,6 +679,9 @@ struct StreamView: View {
     /// The iPad is a trackpad for the external monitor right now.
     private var monitorDrivesInput: Bool { external.inputTargetsMonitor }
 
+    /// An external monitor is attached (its menu is in the control bar).
+    private var monitorAttached: Bool { external.isMonitorConnected }
+
     /// Session whose stats the status pill shows.
     private var pillSession: StreamSession {
         monitorDrivesInput ? external.monitorSession : session
@@ -687,6 +694,7 @@ struct StreamView: View {
     }
 #else
     private var monitorDrivesInput: Bool { false }
+    private var monitorAttached: Bool { false }
     private var pillSession: StreamSession { session }
 #endif
 
@@ -839,10 +847,11 @@ struct StreamView: View {
     }
 
     /// Per-display sidebar toggle (only when the host exposes more than
-    /// the unified canvas). The text label collapses to the icon on
-    /// compact width to save room.
+    /// the unified canvas, and no external monitor is attached — its menu
+    /// picks the iPad's display then). The text label collapses to the
+    /// icon on compact width to save room.
     @ViewBuilder private var displaysButton: some View {
-        if !session.availableDisplays.isEmpty && !monitorDrivesInput {
+        if !session.availableDisplays.isEmpty && !monitorAttached {
             Button {
                 withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
                     showDisplaySidebar.toggle()

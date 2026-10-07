@@ -24,6 +24,7 @@ struct ExternalDisplayMenu: View, Equatable {
         var isParked: Bool
         var pickerDisplays: [DisplayInfo]
         var monitorDisplayID: UInt32?
+        var monitorShowsAll: Bool
         var iPadDisplayID: UInt32?
         var iPadMode: ExternalDisplayController.IPadMode
         var rotation: ExternalDisplayController.MonitorRotation
@@ -33,6 +34,7 @@ struct ExternalDisplayMenu: View, Equatable {
             isParked = controller.isParked
             pickerDisplays = controller.pickerDisplays
             monitorDisplayID = controller.monitorDisplayID
+            monitorShowsAll = controller.monitorShowsAllDisplays
             iPadDisplayID = controller.iPadDisplayID
             iPadMode = controller.iPadMode
             rotation = controller.monitorRotation
@@ -63,13 +65,23 @@ struct ExternalDisplayMenu: View, Equatable {
 
             if !state.pickerDisplays.isEmpty && !state.isParked {
                 Section("Monitor shows") {
+                    Button {
+                        controller.selectMonitorDisplay(nil)
+                    } label: {
+                        HStack {
+                            Text("All displays")
+                            if state.monitorShowsAll {
+                                Image(systemName: "checkmark")
+                            }
+                        }
+                    }
                     ForEach(state.pickerDisplays) { display in
                         Button {
                             controller.selectMonitorDisplay(display.id)
                         } label: {
                             HStack {
                                 Text(label(display))
-                                if state.monitorDisplayID == display.id {
+                                if !state.monitorShowsAll && state.monitorDisplayID == display.id {
                                     Image(systemName: "checkmark")
                                 }
                             }
@@ -170,7 +182,7 @@ struct ExternalDisplayMenu: View, Equatable {
 
     private func iPadLabel(_ display: DisplayInfo) -> String {
         let base = display.name.isEmpty ? "\(display.width)×\(display.height)" : display.name
-        return state.monitorDisplayID == display.id ? "\(base) (monitor)" : base
+        return !state.monitorShowsAll && state.monitorDisplayID == display.id ? "\(base) (monitor)" : base
     }
 }
 

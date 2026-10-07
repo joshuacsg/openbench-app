@@ -92,8 +92,12 @@ final class ExternalDisplayController: ObservableObject {
     /// A monitor scene is attached and foregrounded.
     @Published private(set) var isMonitorConnected = false
     @Published private(set) var status: MonitorStatus = .idle
-    /// Host display the monitor shows (nil until the first Welcome).
+    /// Host display the monitor shows (nil until the first Welcome, or
+    /// while it shows all displays).
     @Published private(set) var monitorDisplayID: UInt32?
+    /// The monitor shows the host's composite of every display side by
+    /// side; the trackpad cursor crosses between them.
+    @Published private(set) var monitorShowsAllDisplays = false
     /// Trackpad cursor in the monitor session's canvas pixels.
     @Published var monitorCursor: CGPoint?
 
@@ -236,6 +240,7 @@ final class ExternalDisplayController: ObservableObject {
         quickRejects = 0
         hasBeenLive = false
         monitorDisplayID = nil
+        monitorShowsAllDisplays = false
         if isParked { status = .idle }
 
         primaryCancellables.removeAll()
@@ -282,9 +287,10 @@ final class ExternalDisplayController: ObservableObject {
 
     // MARK: - User actions
 
-    /// Point the monitor at a host display.
-    func selectMonitorDisplay(_ id: UInt32) {
+    /// Point the monitor at a host display, or at all of them (nil).
+    func selectMonitorDisplay(_ id: UInt32?) {
         monitorDisplayID = id
+        monitorShowsAllDisplays = id == nil
         guard monitorSession.state == .connected else { return }
         monitorSession.resetDecodePipeline()
         controlRepeater.send(.setActiveDisplay(displayId: id)) { [weak monitorSession] in
@@ -409,7 +415,7 @@ final class ExternalDisplayController: ObservableObject {
         sawWelcome = true
         guard needsDisplayApply, monitorSession.state == .connected else { return }
         needsDisplayApply = false
-        let id = resolveMonitorDisplay(in: displays)
+        let id = monitorShowsAllDisplays ? nil : resolveMonitorDisplay(in: displays)
         monitorDisplayID = id
         monitorSession.resetDecodePipeline()
         controlRepeater.send(.setActiveDisplay(displayId: id)) { [weak monitorSession] in
