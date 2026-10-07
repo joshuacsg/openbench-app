@@ -155,7 +155,7 @@ struct ExternalDisplayView: View {
     /// from canvas pixels into the aspect-fitted video rect.
     private var cursorOverlay: some View {
         GeometryReader { geo in
-            if controller.inputTargetsMonitor,
+            if controller.monitorShowsCursor,
                let cursor = controller.monitorCursor,
                session.canvasSize.width > 0, session.canvasSize.height > 0 {
                 let canvas = session.canvasSize

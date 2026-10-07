@@ -279,6 +279,9 @@ struct StreamView: View {
     /// Display sidebar visibility.
     @State private var showDisplaySidebar = false
 
+    /// External monitor arrangement editor visibility.
+    @State private var showDisplayArrangement = false
+
 #if canImport(UIKit)
     /// Drives the compact (iPhone) control-bar layout. `.compact` on
     /// iPhone portrait (and iPad Slide Over); `.regular` on iPad/Mac.
@@ -582,6 +585,9 @@ struct StreamView: View {
                 .presentationDetents([.medium])
         }
 #if canImport(UIKit)
+        .sheet(isPresented: $showDisplayArrangement) {
+            DisplayArrangementView(controller: external)
+        }
         .alert("Too large to paste", isPresented: $showPasteTooLarge) {
             Button("OK", role: .cancel) {}
         } message: {
@@ -655,6 +661,17 @@ struct StreamView: View {
                 trackpadGestures: session.trackpadGestures,
                 viewportScale: viewportScale,
                 viewportOffset: viewportOffset,
+                trackpadLink: trackpadMode ? external.secondScreenLink : nil,
+                onLinkedDisplayActive: { onMonitor in
+                    // The cursor crossed between the iPad's display and
+                    // the monitor's: input follows it.
+                    external.setCursorOnMonitor(onMonitor)
+                    let target = external.inputSession(primary: session)
+                    inputManager.sendControl = { [weak target] in target?.sendControl($0) }
+                },
+                onLinkedCursorMoved: { pt in
+                    if let pt { external.monitorCursor = pt }
+                },
                 onPointerMoved: { pt in cursor.position = pt },
                 onViewportChanged: { scale, offset in
                     viewportScale = scale
@@ -890,7 +907,8 @@ struct StreamView: View {
             ExternalDisplayMenu(
                 controller: external,
                 state: .init(external),
-                onSelectIPadDisplay: { selectDisplay($0) }
+                onSelectIPadDisplay: { selectDisplay($0) },
+                onArrange: { showDisplayArrangement = true }
             )
             .equatable()
         }
@@ -1117,6 +1135,9 @@ struct InputCaptureViewRepresentable: UIViewRepresentable {
     var viewportScale: CGFloat = 1.0
     var viewportOffset: CGPoint = .zero
     var constrainTrackpadToCanvas: Bool = false
+    var trackpadLink: InputCaptureView.TrackpadLink?
+    var onLinkedDisplayActive: ((Bool) -> Void)?
+    var onLinkedCursorMoved: ((CGPoint?) -> Void)?
     var onPointerMoved: ((CGPoint?) -> Void)?
     var onCanvasPointerMoved: ((CGPoint?) -> Void)?
     var onViewportChanged: ((CGFloat, CGPoint) -> Void)?
@@ -1132,6 +1153,9 @@ struct InputCaptureViewRepresentable: UIViewRepresentable {
         view.onPointerMoved = onPointerMoved
         view.onCanvasPointerMoved = onCanvasPointerMoved
         view.onViewportChanged = onViewportChanged
+        view.onLinkedDisplayActive = onLinkedDisplayActive
+        view.onLinkedCursorMoved = onLinkedCursorMoved
+        view.trackpadLink = trackpadLink
         view.backgroundColor = .clear
         return view
     }
@@ -1146,6 +1170,9 @@ struct InputCaptureViewRepresentable: UIViewRepresentable {
         view.onPointerMoved = onPointerMoved
         view.onCanvasPointerMoved = onCanvasPointerMoved
         view.onViewportChanged = onViewportChanged
+        view.onLinkedDisplayActive = onLinkedDisplayActive
+        view.onLinkedCursorMoved = onLinkedCursorMoved
+        view.trackpadLink = trackpadLink
         // Sync viewport from minimap slider → InputCaptureView.
         if abs(view.viewportScale - viewportScale) > 0.01
             || abs(view.viewportOffset.x - viewportOffset.x) > 1

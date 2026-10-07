@@ -47,6 +47,8 @@ struct ExternalDisplayMenu: View, Equatable {
     /// Points the iPad's own stream at a host display (StreamView owns
     /// that selection).
     let onSelectIPadDisplay: (UInt32) -> Void
+    /// Opens the arrangement editor.
+    let onArrange: () -> Void
 
     static func == (lhs: Self, rhs: Self) -> Bool { lhs.state == rhs.state }
 
@@ -106,6 +108,11 @@ struct ExternalDisplayMenu: View, Equatable {
                     }
                 } label: {
                     Label("Rotate monitor · \(state.rotation.label)", systemImage: "rotate.right")
+                }
+                Button {
+                    onArrange()
+                } label: {
+                    Label("Arrange displays…", systemImage: "rectangle.on.rectangle")
                 }
             }
 
@@ -320,5 +327,92 @@ final class DockedKeyboardTracker: ObservableObject {
             .lazy
             .compactMap { $0.keyWindow ?? $0.windows.first }
             .first
+    }
+}
+
+/// macOS-style "Arrange Displays": drag the monitor to the iPad edge it
+/// physically sits against. In Second screen mode the iPad's trackpad
+/// cursor crosses onto the monitor through that edge.
+struct DisplayArrangementView: View {
+    @ObservedObject var controller: ExternalDisplayController
+    @Environment(\.dismiss) private var dismiss
+    /// Monitor center (arrangement space) when the current drag began.
+    @State private var dragStart: CGPoint?
+
+    var body: some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("Drag the monitor to where it sits next to your iPad. In Second screen mode with the trackpad, the cursor moves onto the monitor across that edge.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                GeometryReader { geo in
+                    board(in: geo.size)
+                }
+                .frame(minHeight: 300)
+                .background(RoundedRectangle(cornerRadius: 14).fill(Color(white: 0.1)))
+            }
+            .padding()
+            .navigationTitle("Arrange Displays")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+    }
+
+    private func board(in size: CGSize) -> some View {
+        let sizes = controller.arrangementPreviewSizes
+        let rects = controller.arrangement.rects(iPad: sizes.iPad, monitor: sizes.monitor)
+        // Fixed scale (room for the monitor on any side) so the board
+        // doesn't rescale mid-drag.
+        let scale = 0.9 * min(size.width / (sizes.iPad.width + 2 * sizes.monitor.width),
+                              size.height / (sizes.iPad.height + 2 * sizes.monitor.height))
+        let origin = CGPoint(x: size.width / 2 - sizes.iPad.width * scale / 2,
+                             y: size.height / 2 - sizes.iPad.height * scale / 2)
+        func place(_ r: CGRect) -> CGRect {
+            CGRect(x: origin.x + r.minX * scale, y: origin.y + r.minY * scale,
+                   width: r.width * scale, height: r.height * scale)
+        }
+        let monitorShows = controller.monitorShowsAllDisplays ? nil : controller.monitorDisplayID
+
+        return ZStack {
+            tile("iPad", controller.displayName(controller.iPadDisplayID), rect: place(rects.iPad), tint: .gray)
+            tile("Monitor", controller.displayName(monitorShows), rect: place(rects.monitor), tint: .blue)
+                .gesture(
+                    DragGesture()
+                        .onChanged { value in
+                            let start = dragStart ?? CGPoint(x: rects.monitor.midX, y: rects.monitor.midY)
+                            dragStart = start
+                            let center = CGPoint(x: start.x + value.translation.width / scale,
+                                                 y: start.y + value.translation.height / scale)
+                            withAnimation(.interactiveSpring()) {
+                                controller.arrangement = .snapped(
+                                    monitorCenter: center, iPad: sizes.iPad, monitor: sizes.monitor
+                                )
+                            }
+                        }
+                        .onEnded { _ in dragStart = nil }
+                )
+        }
+        .frame(width: size.width, height: size.height)
+    }
+
+    private func tile(_ title: String, _ subtitle: String, rect: CGRect, tint: Color) -> some View {
+        RoundedRectangle(cornerRadius: 6)
+            .fill(tint.opacity(0.35).gradient)
+            .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(.white.opacity(0.35), lineWidth: 1))
+            .overlay {
+                VStack(spacing: 2) {
+                    Text(title).font(.headline)
+                    Text(subtitle).font(.caption).foregroundStyle(.secondary)
+                }
+                .lineLimit(1)
+                .minimumScaleFactor(0.6)
+                .padding(6)
+            }
+            .frame(width: rect.width, height: rect.height)
+            .position(x: rect.midX, y: rect.midY)
     }
 }
