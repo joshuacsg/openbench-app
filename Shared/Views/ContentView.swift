@@ -227,6 +227,16 @@ private struct StreamSettingsMenu: View, Equatable {
                 bitrateKbps: bitrateKbps,
                 maxDimension: maxDimension
             ))
+            #if canImport(UIKit)
+            // Also reach the external-monitor session (the iPad's own is
+            // paused in Trackpad mode). Read through `.shared` at call
+            // time so this view still doesn't observe the controller.
+            ExternalDisplayController.shared.applyStreamSettings(
+                fps: fps,
+                bitrateKbps: bitrateKbps,
+                maxDimension: maxDimension
+            )
+            #endif
         }
     }
 }

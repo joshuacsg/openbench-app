@@ -531,10 +531,22 @@ final class ExternalDisplayController: ObservableObject {
         let fps = defaults.object(forKey: "stream.fps") as? Int ?? 30
         let bitrate = defaults.object(forKey: "stream.bitrateKbps") as? Int ?? 5_000
         let maxDimension = defaults.object(forKey: "stream.maxDimension") as? Int ?? 1920
-        monitorSession.sendControl(.setStreamSettings(
+        applyStreamSettings(
             fps: UInt32(fps),
             bitrateKbps: UInt32(bitrate),
             maxDimension: UInt32(maxDimension)
+        )
+    }
+
+    /// Push a live settings change (the gear menu) to the monitor
+    /// connection too. In Trackpad mode the iPad's own session is paused,
+    /// so without this the monitor only picked changes up on reconnect.
+    func applyStreamSettings(fps: UInt32, bitrateKbps: UInt32, maxDimension: UInt32) {
+        guard monitorSession.state == .connected else { return }
+        monitorSession.sendControl(.setStreamSettings(
+            fps: fps,
+            bitrateKbps: bitrateKbps,
+            maxDimension: maxDimension
         ))
     }
 }
