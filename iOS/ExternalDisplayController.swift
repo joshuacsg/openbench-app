@@ -182,6 +182,9 @@ final class ExternalDisplayController: ObservableObject {
         // session into the iPad session's QUIC connection (same process,
         // endpoint and parameters) instead of opening a second viewer.
         monitorSession.tlsServerName = "fastport-monitor"
+        // The user's stream preferences belong to the gear menu; the
+        // monitor connection's Welcome must not overwrite them.
+        monitorSession.persistsStreamSettings = false
 
         // Views observe only the controller; surface the monitor
         // session's stats/state changes through it.
