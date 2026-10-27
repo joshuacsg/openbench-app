@@ -30,6 +30,7 @@
 		B73EF428259E897C1DDFA720 /* ServiceBrowser.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8220676B76EE72C55D2E1C95 /* ServiceBrowser.swift */; };
 		B747E2E7EF3CF5A33C2E6714 /* TrustPromptView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2812EE95D69353BD67BC641D /* TrustPromptView.swift */; };
 		B7B56F388C13CFE8E3147EB0 /* HostManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 189EA967E89C24F30695DB06 /* HostManager.swift */; };
+		A1C0FFEE0000000000000001 /* HostControl.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C0FFEE0000000000000002 /* HostControl.swift */; };
 		BB3EAC162BB9208F2C0DC309 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC56151BD60A6B0F7ADD6123 /* ContentView.swift */; };
 		BECA9964E19F5C7523CE6F86 /* PermissionChecker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7FF94738FCE7DEF235BAB120 /* PermissionChecker.swift */; };
 		C2BCBC2D3245D9065468F117 /* CertificateStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7CD29C8AEB81EB5B255C1E8 /* CertificateStore.swift */; };
@@ -62,6 +63,7 @@
 		04DA354EE6A15711CB2FB9F3 /* OpenBench.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = OpenBench.entitlements; sourceTree = "<group>"; };
 		0D47C4DE40AA3DDD80951AF6 /* DisplayPickerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DisplayPickerView.swift; sourceTree = "<group>"; };
 		189EA967E89C24F30695DB06 /* HostManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostManager.swift; sourceTree = "<group>"; };
+		A1C0FFEE0000000000000002 /* HostControl.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostControl.swift; sourceTree = "<group>"; };
 		2812EE95D69353BD67BC641D /* TrustPromptView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrustPromptView.swift; sourceTree = "<group>"; };
 		2CD10BE1524D03AAD391DB8A /* FrameReassembler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FrameReassembler.swift; sourceTree = "<group>"; };
 		2DA11CBF8E60521D33F60677 /* InputManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InputManager.swift; sourceTree = "<group>"; };
@@ -132,6 +134,7 @@
 			children = (
 				F6044530E8E492165DD706E7 /* HostApp.swift */,
 				189EA967E89C24F30695DB06 /* HostManager.swift */,
+				A1C0FFEE0000000000000002 /* HostControl.swift */,
 				7FF94738FCE7DEF235BAB120 /* PermissionChecker.swift */,
 				B0680F5CFEA74BDE140F4051 /* VirtualDisplay.swift */,
 				3B13B9A1194BDA9357982944 /* VirtualDisplayManager.swift */,
@@ -337,6 +340,7 @@
 			files = (
 				92DE1A64E34A19DFA9302EF4 /* HostApp.swift in Sources */,
 				B7B56F388C13CFE8E3147EB0 /* HostManager.swift in Sources */,
+				A1C0FFEE0000000000000001 /* HostControl.swift in Sources */,
 				BECA9964E19F5C7523CE6F86 /* PermissionChecker.swift in Sources */,
 				4A51599B65F9B27906A59E12 /* VirtualDisplay.swift in Sources */,
 				DCA747CD47B7D686717B58D4 /* VirtualDisplayManager.swift in Sources */,
@@ -479,6 +483,7 @@
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Host/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = "OpenBench Host";
 				INFOPLIST_KEY_LSUIElement = YES;
 				INFOPLIST_KEY_NSAccessibilityUsageDescription = "OpenBench Host needs Accessibility to inject mouse and keyboard input from connected viewers.";
@@ -584,6 +589,7 @@
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Host/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = "OpenBench Host";
 				INFOPLIST_KEY_LSUIElement = YES;
 				INFOPLIST_KEY_NSAccessibilityUsageDescription = "OpenBench Host needs Accessibility to inject mouse and keyboard input from connected viewers.";
