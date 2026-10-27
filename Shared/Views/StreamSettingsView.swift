@@ -29,13 +29,16 @@ public struct StreamSettingsView: View {
     }
 
     private static let resolutionOptions: [(label: String, value: Int)] = [
+        ("720p-class (1280)", 1280),
         ("1080p-class (1920)", 1920),
         ("2.5K (2560)", 2560),
         ("4K (3840)", 3840),
         ("Native", 0),
     ]
-    private static let fpsOptions = [30, 60, 120]
+    private static let fpsOptions = [20, 30, 60, 120]
     private static let bitrateOptions: [(label: String, kbps: Int)] = [
+        ("2 Mbps", 2_000),
+        ("3 Mbps", 3_000),
         ("5 Mbps", 5_000),
         ("10 Mbps", 10_000),
         ("20 Mbps", 20_000),

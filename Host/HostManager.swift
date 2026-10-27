@@ -8,6 +8,10 @@ import CoreGraphics
 
 @MainActor
 final class HostManager: ObservableObject {
+    /// One per app: the menu bar scene and `fastport-host://` URL
+    /// commands (HostControl) drive the same instance.
+    static let shared = HostManager()
+
     @Published var isRunning = false {
         didSet {
             guard isRunning != oldValue else { return }

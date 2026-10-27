@@ -14,7 +14,8 @@
 //
 // Content: full-screen, aspect-fit video of the monitor session (black
 // letterbox) with a software cursor while the iPad is its trackpad, or
-// a minimal idle screen when nothing is streaming.
+// a minimal idle screen when nothing is streaming — turned by the
+// user's monitor rotation setting.
 
 import SwiftUI
 import UIKit
@@ -120,22 +121,41 @@ struct ExternalDisplayView: View {
         ZStack {
             Color.black.ignoresSafeArea()
 
-            if session.state == .connected {
-                MetalVideoView(session: session)
-                    .ignoresSafeArea()
-                cursorOverlay
-            } else {
-                idleScreen
+            rotated {
+                if session.state == .connected {
+                    MetalVideoView(session: session)
+                    cursorOverlay
+                } else {
+                    idleScreen
+                }
             }
         }
         .statusBarHidden()
+    }
+
+    /// Lays content out in the rotated frame (width/height swapped on a
+    /// quarter turn) and turns it to fit the monitor. Input needs no
+    /// change: the picture reads upright on a monitor mounted that way.
+    private func rotated<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        let rotation = controller.monitorRotation
+        let content = content()
+        return GeometryReader { geo in
+            let size = rotation.isQuarterTurn
+                ? CGSize(width: geo.size.height, height: geo.size.width)
+                : geo.size
+            ZStack { content }
+                .frame(width: size.width, height: size.height)
+                .rotationEffect(.degrees(rotation.degrees))
+                .position(x: geo.size.width / 2, y: geo.size.height / 2)
+        }
+        .ignoresSafeArea()
     }
 
     /// Software cursor at the trackpad's authoritative position, mapped
     /// from canvas pixels into the aspect-fitted video rect.
     private var cursorOverlay: some View {
         GeometryReader { geo in
-            if controller.inputTargetsMonitor,
+            if controller.monitorShowsCursor,
                let cursor = controller.monitorCursor,
                session.canvasSize.width > 0, session.canvasSize.height > 0 {
                 let canvas = session.canvasSize

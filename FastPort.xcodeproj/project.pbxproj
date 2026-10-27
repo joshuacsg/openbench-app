@@ -27,6 +27,7 @@
 		70298A693E6C8E8D5DE5A72A /* CertificateStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4D23C6765CFA5C4DC4149D85 /* CertificateStore.swift */; };
 		73CE518AF8FAE422ACDB02EA /* DisplayPickerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1C881804F771B7AEDBD14C58 /* DisplayPickerView.swift */; };
 		7DBEF88FF97778B490023F36 /* PermissionChecker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 98BC4B06800EF5D7458C2A67 /* PermissionChecker.swift */; };
+		A1C0FFEE0000000000000001 /* HostControl.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C0FFEE0000000000000002 /* HostControl.swift */; };
 		8425F7EBAD9F10247F8CEB6D /* VideoDecoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = F288A358E2BC0C047EC292A5 /* VideoDecoder.swift */; };
 		86555B55DA55968869242195 /* MetalRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = DFC6E4B14A2CFB8A16DD5E26 /* MetalRenderer.swift */; };
 		8AE06985095B72C0EDF14D8A /* PasteModalView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3B5E0F9FAFD5DB1BFCFB8EC2 /* PasteModalView.swift */; };
@@ -73,6 +74,7 @@
 		7DA29A653495EA4F4C4998B3 /* OpenBench.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = OpenBench.entitlements; sourceTree = "<group>"; };
 		809891850160D14047DEEC94 /* HostApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostApp.swift; sourceTree = "<group>"; };
 		8AB4C285A41288BBEBB4D319 /* ClipboardManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipboardManager.swift; sourceTree = "<group>"; };
+		A1C0FFEE0000000000000002 /* HostControl.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostControl.swift; sourceTree = "<group>"; };
 		98BC4B06800EF5D7458C2A67 /* PermissionChecker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PermissionChecker.swift; sourceTree = "<group>"; };
 		A1C968512FB8608769C0CF2E /* StreamSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StreamSession.swift; sourceTree = "<group>"; };
 		A462204794BB86B5D54FC65D /* KeyboardInputManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardInputManager.swift; sourceTree = "<group>"; };
@@ -186,6 +188,7 @@
 			children = (
 				809891850160D14047DEEC94 /* HostApp.swift */,
 				46175A35F34B87EBA3CAA3A1 /* HostManager.swift */,
+				A1C0FFEE0000000000000002 /* HostControl.swift */,
 				98BC4B06800EF5D7458C2A67 /* PermissionChecker.swift */,
 				C818CBFD122986257DB7E0B4 /* VirtualDisplay.swift */,
 				094B4563336F21AB0BA2096A /* VirtualDisplayManager.swift */,
@@ -364,6 +367,7 @@
 			files = (
 				02C944C12FA10267879B58BA /* HostApp.swift in Sources */,
 				9E777745F882F045D3568AB3 /* HostManager.swift in Sources */,
+				A1C0FFEE0000000000000001 /* HostControl.swift in Sources */,
 				7DBEF88FF97778B490023F36 /* PermissionChecker.swift in Sources */,
 				E6C16C38B30D7D03328B0DE1 /* VirtualDisplay.swift in Sources */,
 				B1F374EE3369E4FEDD5DAB6E /* VirtualDisplayManager.swift in Sources */,
@@ -561,6 +565,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 6T4Q524WV2;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Host/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = "FastPort Host";
 				INFOPLIST_KEY_LSUIElement = YES;
 				INFOPLIST_KEY_NSAccessibilityUsageDescription = "FastPort Host needs Accessibility to inject mouse and keyboard input from connected viewers.";
@@ -608,6 +613,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 6T4Q524WV2;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Host/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = "FastPort Host";
 				INFOPLIST_KEY_LSUIElement = YES;
 				INFOPLIST_KEY_NSAccessibilityUsageDescription = "FastPort Host needs Accessibility to inject mouse and keyboard input from connected viewers.";

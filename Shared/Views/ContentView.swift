@@ -227,6 +227,16 @@ private struct StreamSettingsMenu: View, Equatable {
                 bitrateKbps: bitrateKbps,
                 maxDimension: maxDimension
             ))
+            #if canImport(UIKit)
+            // Also reach the external-monitor session (the iPad's own is
+            // paused in Trackpad mode). Read through `.shared` at call
+            // time so this view still doesn't observe the controller.
+            ExternalDisplayController.shared.applyStreamSettings(
+                fps: fps,
+                bitrateKbps: bitrateKbps,
+                maxDimension: maxDimension
+            )
+            #endif
         }
     }
 }
@@ -278,6 +288,9 @@ struct StreamView: View {
 
     /// Display sidebar visibility.
     @State private var showDisplaySidebar = false
+
+    /// External monitor arrangement editor visibility.
+    @State private var showDisplayArrangement = false
 
 #if canImport(UIKit)
     /// Drives the compact (iPhone) control-bar layout. `.compact` on
@@ -446,16 +459,7 @@ struct StreamView: View {
                         thumbnails: session.displayThumbnails,
                         selectedDisplayID: selectedDisplayID,
                         onSelect: { displayID in
-                            selectedDisplayID = displayID
-                            rememberedDisplay = .some(displayID)
-                            UserDefaults.standard.set(
-                                session.availableDisplays.first(where: { $0.id == displayID })?.name,
-                                forKey: rememberedNameKey
-                            )
-                            session.resetDecodePipeline()
-                            controlRepeater.send(.setActiveDisplay(displayId: displayID)) { [weak session] in
-                                session?.sendControl($0)
-                            }
+                            selectDisplay(displayID)
                             closeDisplaySidebar()
                         },
                         onClose: { closeDisplaySidebar() }
@@ -474,6 +478,10 @@ struct StreamView: View {
 #if canImport(UIKit)
         .onChange(of: selectedDisplayID) { _, id in
             external.iPadDisplayID = id
+        }
+        .onChange(of: monitorAttached) { _, attached in
+            // Its button is gone while a monitor is attached.
+            if attached { closeDisplaySidebar() }
         }
         .onChange(of: monitorDrivesInput) { _, toMonitor in
             // Release any button still held on the session losing
@@ -587,6 +595,9 @@ struct StreamView: View {
                 .presentationDetents([.medium])
         }
 #if canImport(UIKit)
+        .sheet(isPresented: $showDisplayArrangement) {
+            DisplayArrangementView(controller: external)
+        }
         .alert("Too large to paste", isPresented: $showPasteTooLarge) {
             Button("OK", role: .cancel) {}
         } message: {
@@ -618,6 +629,26 @@ struct StreamView: View {
         .ignoresSafeArea(.keyboard)
     }
 
+    /// Point the iPad's stream at a host display (nil = All Displays)
+    /// and remember it for this host.
+    private func selectDisplay(_ displayID: UInt32?) {
+        selectedDisplayID = displayID
+        rememberedDisplay = .some(displayID)
+        UserDefaults.standard.set(
+            session.availableDisplays.first(where: { $0.id == displayID })?.name,
+            forKey: rememberedNameKey
+        )
+#if canImport(UIKit)
+        // Set now, not via onChange, so the external display menu's
+        // snapshot in this same render already marks it.
+        external.iPadDisplayID = displayID
+#endif
+        session.resetDecodePipeline()
+        controlRepeater.send(.setActiveDisplay(displayId: displayID)) { [weak session] in
+            session?.sendControl($0)
+        }
+    }
+
     /// Video + input capture share the same padded frame so
     /// coordinate mapping is accurate.
     private var videoStack: some View {
@@ -640,6 +671,17 @@ struct StreamView: View {
                 trackpadGestures: session.trackpadGestures,
                 viewportScale: viewportScale,
                 viewportOffset: viewportOffset,
+                trackpadLink: trackpadMode ? external.secondScreenLink : nil,
+                onLinkedDisplayActive: { onMonitor in
+                    // The cursor crossed between the iPad's display and
+                    // the monitor's: input follows it.
+                    external.setCursorOnMonitor(onMonitor)
+                    let target = external.inputSession(primary: session)
+                    inputManager.sendControl = { [weak target] in target?.sendControl($0) }
+                },
+                onLinkedCursorMoved: { pt in
+                    if let pt { external.monitorCursor = pt }
+                },
                 onPointerMoved: { pt in cursor.position = pt },
                 onViewportChanged: { scale, offset in
                     viewportScale = scale
@@ -664,6 +706,9 @@ struct StreamView: View {
     /// The iPad is a trackpad for the external monitor right now.
     private var monitorDrivesInput: Bool { external.inputTargetsMonitor }
 
+    /// An external monitor is attached (its menu is in the control bar).
+    private var monitorAttached: Bool { external.isMonitorConnected }
+
     /// Session whose stats the status pill shows.
     private var pillSession: StreamSession {
         monitorDrivesInput ? external.monitorSession : session
@@ -676,6 +721,7 @@ struct StreamView: View {
     }
 #else
     private var monitorDrivesInput: Bool { false }
+    private var monitorAttached: Bool { false }
     private var pillSession: StreamSession { session }
 #endif
 
@@ -828,10 +874,11 @@ struct StreamView: View {
     }
 
     /// Per-display sidebar toggle (only when the host exposes more than
-    /// the unified canvas). The text label collapses to the icon on
-    /// compact width to save room.
+    /// the unified canvas, and no external monitor is attached — its menu
+    /// picks the iPad's display then). The text label collapses to the
+    /// icon on compact width to save room.
     @ViewBuilder private var displaysButton: some View {
-        if !session.availableDisplays.isEmpty && !monitorDrivesInput {
+        if !session.availableDisplays.isEmpty && !monitorAttached {
             Button {
                 withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
                     showDisplaySidebar.toggle()
@@ -862,12 +909,18 @@ struct StreamView: View {
         StreamSettingsMenu(session: session).equatable()
     }
 
-    /// External monitor menu (display it shows + iPad mode), only while
+    /// External monitor menu (what the monitor and iPad show), only while
     /// a monitor is attached.
     @ViewBuilder private var externalDisplayButton: some View {
 #if canImport(UIKit)
         if external.isMonitorConnected {
-            ExternalDisplayMenu(controller: external)
+            ExternalDisplayMenu(
+                controller: external,
+                state: .init(external),
+                onSelectIPadDisplay: { selectDisplay($0) },
+                onArrange: { showDisplayArrangement = true }
+            )
+            .equatable()
         }
 #endif
     }
@@ -1092,6 +1145,9 @@ struct InputCaptureViewRepresentable: UIViewRepresentable {
     var viewportScale: CGFloat = 1.0
     var viewportOffset: CGPoint = .zero
     var constrainTrackpadToCanvas: Bool = false
+    var trackpadLink: InputCaptureView.TrackpadLink?
+    var onLinkedDisplayActive: ((Bool) -> Void)?
+    var onLinkedCursorMoved: ((CGPoint?) -> Void)?
     var onPointerMoved: ((CGPoint?) -> Void)?
     var onCanvasPointerMoved: ((CGPoint?) -> Void)?
     var onViewportChanged: ((CGFloat, CGPoint) -> Void)?
@@ -1107,6 +1163,9 @@ struct InputCaptureViewRepresentable: UIViewRepresentable {
         view.onPointerMoved = onPointerMoved
         view.onCanvasPointerMoved = onCanvasPointerMoved
         view.onViewportChanged = onViewportChanged
+        view.onLinkedDisplayActive = onLinkedDisplayActive
+        view.onLinkedCursorMoved = onLinkedCursorMoved
+        view.trackpadLink = trackpadLink
         view.backgroundColor = .clear
         return view
     }
@@ -1121,6 +1180,9 @@ struct InputCaptureViewRepresentable: UIViewRepresentable {
         view.onPointerMoved = onPointerMoved
         view.onCanvasPointerMoved = onCanvasPointerMoved
         view.onViewportChanged = onViewportChanged
+        view.onLinkedDisplayActive = onLinkedDisplayActive
+        view.onLinkedCursorMoved = onLinkedCursorMoved
+        view.trackpadLink = trackpadLink
         // Sync viewport from minimap slider → InputCaptureView.
         if abs(view.viewportScale - viewportScale) > 0.01
             || abs(view.viewportOffset.x - viewportOffset.x) > 1

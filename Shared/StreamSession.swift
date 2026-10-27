@@ -176,10 +176,19 @@ public final class StreamSession: ObservableObject {
     /// reconnect-only decode-pipeline reset. See RFC-0009 #2.
     private var hasBecomeReady = false
 
-    /// Shared rate limit for ALL keyframe requests (loss detector +
-    /// lag watchdog) so concurrent triggers can't storm the host.
+    /// Single-flight limit for ALL keyframe requests (loss detector +
+    /// lag watchdog): once one is sent, no other goes out until a
+    /// keyframe arrives (this resets to 0) or the timeout passes
+    /// (max(1 s, 3 x RTT)), so a slow IDR isn't re-requested while it
+    /// is still arriving.
     private var nextKeyframeRequestTime: TimeInterval = 0
-    private var keyframeRetryInterval: TimeInterval = 0
+    private var keyframeInFlight: Bool {
+        nextKeyframeRequestTime > ProcessInfo.processInfo.systemUptime
+    }
+    /// True when the current skip-to-keyframe was started by the lag
+    /// watchdog (as opposed to loss / decode error / unpause), which is
+    /// the only case where a still-lagged keyframe means standing delay.
+    private var skipCausedByLag = false
     private var receiveRttMs: UInt32 = 0
 
     /// Set by the UI when the minimap is visible; thumbnail generation
@@ -224,6 +233,19 @@ public final class StreamSession: ObservableObject {
     private var lastFeedbackFragments: UInt64 = 0
     private var lastFeedbackLostFragments: UInt64 = 0
     private var lastFeedbackTime: TimeInterval = 0
+    /// Raw counter deltas for the last few 250 ms feedback slots. Loss
+    /// ratios are computed over this ~1 s window so a window of 4 frames
+    /// can't swing between 0 % and 100 %.
+    private struct FeedbackSlot {
+        var delivered: UInt64 = 0
+        var discards: UInt64 = 0
+        var fragments: UInt64 = 0
+        var lostFragments: UInt64 = 0
+    }
+    private static let feedbackWindowSlots = 4
+    private var feedbackSlots: [FeedbackSlot] = []
+    private var lastReportedLossPct: Float = 0
+    private var lastReportedRawLossPct: Float = 0
 
     // Auto-reconnect with exponential backoff
     private var reconnectTask: Task<Void, Never>?
@@ -234,6 +256,13 @@ public final class StreamSession: ObservableObject {
     // Datagram type-byte constants.
     private static let typeVideo:   UInt8 = 0x01
     private static let typeControl: UInt8 = 0x02
+
+    /// When true (default) the effective settings the host reports in
+    /// Welcome are written to UserDefaults (stream.fps / stream.bitrateKbps
+    /// / stream.maxDimension) so the picker follows the host. Set false on
+    /// a secondary session (external monitor) so it doesn't overwrite the
+    /// user's preferences.
+    public var persistsStreamSettings = true
 
     /// Called on every decoded frame with the CVPixelBuffer.
     public var onDecodedFrame: ((CVPixelBuffer, UInt64) -> Void)?
@@ -464,7 +493,6 @@ public final class StreamSession: ObservableObject {
         if isDecodePaused { return }
         if frame.isKeyframe {
             nextKeyframeRequestTime = 0
-            keyframeRetryInterval = 0
         }
 
         // Monotonic clock: CFAbsoluteTime is wall time and NTP steps
@@ -492,11 +520,15 @@ public final class StreamSession: ObservableObject {
             if frame.isKeyframe {
                 skippingUntilKeyframe = false
                 consecutiveLaggedFrames = 0
-                // If the backlog is drained and lag STILL exceeds the
-                // threshold, it's standing transport delay (path change,
-                // bufferbloat), not decoder queueing — re-anchor the
-                // baseline instead of resyncing forever.
-                if lagMs > Self.maxLagMs {
+                let lagInitiated = skipCausedByLag
+                skipCausedByLag = false
+                // If a lag-initiated drain finished and lag STILL exceeds
+                // the threshold, it's standing transport delay (path
+                // change, bufferbloat), not decoder queueing — re-anchor
+                // the baseline instead of resyncing forever. A loss
+                // recovery keyframe is late only because the IDR itself
+                // is big, so it must not re-anchor to that elevated delay.
+                if lagInitiated && lagMs > Self.maxLagMs {
                     lagBaselineUs = offset
                     print("[StreamSession] re-anchored lag baseline (+\(Int(lagMs)) ms standing delay)")
                 } else {
@@ -505,12 +537,16 @@ public final class StreamSession: ObservableObject {
             } else {
                 return // draining to live — skip decode entirely
             }
-        } else if lagMs > Self.maxLagMs {
+        } else if lagMs > Self.maxLagMs && !keyframeInFlight {
             // Only drop to live after several consecutive lagged frames:
-            // a lone bad timestamp shouldn't storm the host.
+            // a lone bad timestamp shouldn't storm the host. Not while a
+            // requested keyframe is still in flight: its burst is what
+            // queues the frames behind it, and another request would
+            // only start the next burst.
             consecutiveLaggedFrames += 1
             if consecutiveLaggedFrames >= Self.lagTripCount {
                 skippingUntilKeyframe = !frame.isKeyframe
+                skipCausedByLag = skippingUntilKeyframe
                 print("[StreamSession] \(Int(lagMs)) ms behind live (\(consecutiveLaggedFrames)×) — dropping to live, requesting keyframe")
                 requestKeyframe()
                 if skippingUntilKeyframe { return }
@@ -540,16 +576,15 @@ public final class StreamSession: ObservableObject {
         requestKeyframe()
     }
 
-    /// One backoff for loss, decode errors and the lag watchdog. The
-    /// receive timer retries even when the host sends no more video.
+    /// One single-flight gate for loss, decode errors and the lag
+    /// watchdog. The receive timer retries (after the timeout) even
+    /// when the host sends no more video.
     /// Called under pipelineLock.
     private func requestKeyframe() {
         let now = ProcessInfo.processInfo.systemUptime
         guard let conn = receiveConnection, now >= nextKeyframeRequestTime else { return }
         sendReceiveControl(.requestKeyframe, on: conn)
-        let initial = min(1.0, max(0.1, Double(receiveRttMs) / 1000.0))
-        keyframeRetryInterval = keyframeRetryInterval == 0 ? initial : min(1.0, keyframeRetryInterval * 2)
-        nextKeyframeRequestTime = now + keyframeRetryInterval
+        nextKeyframeRequestTime = now + max(1.0, 3.0 * Double(receiveRttMs) / 1000.0)
     }
 
     private func startFeedbackLoop() {
@@ -563,6 +598,9 @@ public final class StreamSession: ObservableObject {
         lastFeedbackFragments = reassembler.totalDataFragments
         lastFeedbackLostFragments = reassembler.lostDataFragments
         lastFeedbackTime = ProcessInfo.processInfo.systemUptime
+        feedbackSlots.removeAll()
+        lastReportedLossPct = 0
+        lastReportedRawLossPct = 0
         // Advertise FEC support before starting to drain the first IDR.
         sendReceiveControl(.qualityFeedback(rttMs: receiveRttMs, lossPct: 0,
                                            bandwidthKbps: 0, rawLossPct: 0), on: conn)
@@ -587,7 +625,7 @@ public final class StreamSession: ObservableObject {
             self.pipelineLock.lock()
             defer { self.pipelineLock.unlock() }
             guard self.receiveConnection === conn else { return }
-            self.reassembler.expireStalledFrames(timeout: max(0.06, Double(self.receiveRttMs) / 500.0))
+            self.reassembler.expireStalledFrames(timeout: FrameReassembler.recoveryTimeout(rttMs: self.receiveRttMs))
             self.requestKeyframeIfLossDetected()
             if self.skippingUntilKeyframe && !self.isDecodePaused { self.requestKeyframe() }
         }
@@ -611,10 +649,25 @@ public final class StreamSession: ObservableObject {
         lastFeedbackDiscarded = reassembler.discarded
         lastFeedbackFragments = reassembler.totalDataFragments
         lastFeedbackLostFragments = reassembler.lostDataFragments
-        let lossPct: Float = dDiscards + dDelivered > 0
-            ? Float(dDiscards) / Float(dDiscards + dDelivered) * 100 : 0
-        let rawLossPct: Float = dFragments > 0
-            ? Float(dLostFragments) / Float(dFragments) * 100 : 0
+        feedbackSlots.append(FeedbackSlot(delivered: dDelivered, discards: dDiscards,
+                                          fragments: dFragments, lostFragments: dLostFragments))
+        if feedbackSlots.count > Self.feedbackWindowSlots {
+            feedbackSlots.removeFirst(feedbackSlots.count - Self.feedbackWindowSlots)
+        }
+        let wDelivered = feedbackSlots.reduce(0) { $0 + $1.delivered }
+        let wDiscards = feedbackSlots.reduce(0) { $0 + $1.discards }
+        let wFragments = feedbackSlots.reduce(0) { $0 + $1.fragments }
+        let wLost = feedbackSlots.reduce(0) { $0 + $1.lostFragments }
+        // No traffic at all in the window: carry the last values rather
+        // than fabricating a clean (0 %) or total (100 %) loss report.
+        if wDiscards + wDelivered > 0 {
+            lastReportedLossPct = Float(wDiscards) / Float(wDiscards + wDelivered) * 100
+        }
+        if wFragments > 0 {
+            lastReportedRawLossPct = Float(wLost) / Float(wFragments) * 100
+        }
+        let lossPct = lastReportedLossPct
+        let rawLossPct = lastReportedRawLossPct
         let kbps = min(Double(UInt32.max), Double(dBytes) * 8 / elapsed / 1000)
         sendReceiveControl(.qualityFeedback(rttMs: receiveRttMs, lossPct: lossPct,
                                            bandwidthKbps: UInt32(kbps), rawLossPct: rawLossPct), on: conn)
@@ -638,7 +691,6 @@ public final class StreamSession: ObservableObject {
         receiveConnection = nil
         receiveRttMs = 0
         nextKeyframeRequestTime = 0
-        keyframeRetryInterval = 0
         pipelineLock.unlock()
     }
 
@@ -820,8 +872,8 @@ public final class StreamSession: ObservableObject {
         reassembler.reset()
         lagBaselineUs = nil
         skippingUntilKeyframe = false
+        skipCausedByLag = false
         nextKeyframeRequestTime = 0
-        keyframeRetryInterval = 0
         lastSeenDiscarded = reassembler.discarded
         consecutiveLaggedFrames = 0
         frameTimings.removeAll()
@@ -1128,7 +1180,7 @@ public final class StreamSession: ObservableObject {
                 // Two-way settings: adopt the host's current settings into
                 // the picker (the host is the source of truth). Only when
                 // the host actually reports them — older hosts omit them.
-                if let hostFps = fields["fps"] as? Int {
+                if self?.persistsStreamSettings ?? true, let hostFps = fields["fps"] as? Int {
                     UserDefaults.standard.set(hostFps, forKey: "stream.fps")
                     if let hostBitrate = fields["bitrate_kbps"] as? Int {
                         UserDefaults.standard.set(hostBitrate, forKey: "stream.bitrateKbps")

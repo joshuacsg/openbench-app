@@ -53,6 +53,29 @@ final class ExternalDisplayController: ObservableObject {
         }
     }
 
+    /// Clockwise rotation applied to the monitor's picture, for a monitor
+    /// mounted on its side or upside down (iPadOS can't rotate an
+    /// external display itself).
+    enum MonitorRotation: Int, CaseIterable, Identifiable {
+        case none = 0
+        case clockwise90 = 90
+        case upsideDown = 180
+        case clockwise270 = 270
+
+        var id: Int { rawValue }
+        var degrees: Double { Double(rawValue) }
+        /// Width and height swap on screen.
+        var isQuarterTurn: Bool { self == .clockwise90 || self == .clockwise270 }
+        var label: String {
+            switch self {
+            case .none: return "Standard"
+            case .clockwise90: return "90°"
+            case .upsideDown: return "180°"
+            case .clockwise270: return "270°"
+            }
+        }
+    }
+
     enum MonitorStatus: Equatable {
         /// No monitor, or the iPad isn't streaming.
         case idle
@@ -69,8 +92,12 @@ final class ExternalDisplayController: ObservableObject {
     /// A monitor scene is attached and foregrounded.
     @Published private(set) var isMonitorConnected = false
     @Published private(set) var status: MonitorStatus = .idle
-    /// Host display the monitor shows (nil until the first Welcome).
+    /// Host display the monitor shows (nil until the first Welcome, or
+    /// while it shows all displays).
     @Published private(set) var monitorDisplayID: UInt32?
+    /// The monitor shows the host's composite of every display side by
+    /// side; the trackpad cursor crosses between them.
+    @Published private(set) var monitorShowsAllDisplays = false
     /// Trackpad cursor in the monitor session's canvas pixels.
     @Published var monitorCursor: CGPoint?
 
@@ -80,6 +107,27 @@ final class ExternalDisplayController: ObservableObject {
         didSet { UserDefaults.standard.set(iPadMode.rawValue, forKey: Self.modeKey) }
     }
     private static let modeKey = "externalDisplay.iPadMode"
+
+    /// Persisted the same way as iPadMode.
+    @Published var monitorRotation: MonitorRotation {
+        didSet { UserDefaults.standard.set(monitorRotation.rawValue, forKey: Self.rotationKey) }
+    }
+    private static let rotationKey = "externalDisplay.rotation"
+
+    /// Where the monitor sits relative to the iPad, for the trackpad
+    /// cursor to cross between them in Second screen mode. Persisted.
+    @Published var arrangement: DisplayArrangement {
+        didSet {
+            if let data = try? JSONEncoder().encode(arrangement) {
+                UserDefaults.standard.set(data, forKey: Self.arrangementKey)
+            }
+        }
+    }
+    private static let arrangementKey = "externalDisplay.arrangement"
+
+    /// Second screen mode: the iPad's trackpad cursor has crossed onto
+    /// the monitor, so input goes to the monitor session.
+    @Published private(set) var cursorOnMonitor = false
 
     /// The monitor's own connection to the host. Long-lived; connected
     /// and disconnected as the monitor / iPad session come and go.
@@ -125,10 +173,18 @@ final class ExternalDisplayController: ObservableObject {
     private init() {
         iPadMode = IPadMode(rawValue: UserDefaults.standard.string(forKey: Self.modeKey) ?? "")
             ?? .trackpad
+        monitorRotation = MonitorRotation(rawValue: UserDefaults.standard.integer(forKey: Self.rotationKey))
+            ?? .none
+        arrangement = UserDefaults.standard.data(forKey: Self.arrangementKey)
+            .flatMap { try? JSONDecoder().decode(DisplayArrangement.self, from: $0) }
+            ?? DisplayArrangement()
         // Without a distinct SNI, Network.framework would fold this
         // session into the iPad session's QUIC connection (same process,
         // endpoint and parameters) instead of opening a second viewer.
         monitorSession.tlsServerName = "fastport-monitor"
+        // The user's stream preferences belong to the gear menu; the
+        // monitor connection's Welcome must not overwrite them.
+        monitorSession.persistsStreamSettings = false
 
         // Views observe only the controller; surface the monitor
         // session's stats/state changes through it.
@@ -183,7 +239,74 @@ final class ExternalDisplayController: ObservableObject {
 
     /// The session that should receive input right now.
     func inputSession(primary: StreamSession) -> StreamSession {
-        inputTargetsMonitor ? monitorSession : primary
+        inputTargetsMonitor || cursorOnMonitor ? monitorSession : primary
+    }
+
+    /// The monitor shows a trackpad cursor (Trackpad mode, or the iPad's
+    /// cursor crossed over in Second screen mode).
+    var monitorShowsCursor: Bool { inputTargetsMonitor || cursorOnMonitor }
+
+    /// Called by the iPad's input view as its cursor crosses over.
+    func setCursorOnMonitor(_ onMonitor: Bool) {
+        guard onMonitor != cursorOnMonitor else { return }
+        cursorOnMonitor = onMonitor
+        if !onMonitor { monitorCursor = nil }
+    }
+
+    /// Native size of the picture showing `displayID` (nil = all
+    /// displays side by side), shaped to that stream's canvas aspect.
+    private func pictureSize(_ displayID: UInt32?, canvas: CGSize) -> CGSize? {
+        guard canvas.width > 0, canvas.height > 0 else { return nil }
+        let displays = pickerDisplays
+        let width: CGFloat
+        if let displayID {
+            guard let display = displays.first(where: { $0.id == displayID }) else { return canvas }
+            width = CGFloat(display.width)
+        } else {
+            width = CGFloat(displays.reduce(0) { $0 + $1.width })
+        }
+        guard width > 0 else { return canvas }
+        return CGSize(width: width, height: width * canvas.height / canvas.width)
+    }
+
+    /// The iPad's picture and the monitor's, as arranged (iPad first).
+    /// Nil unless both are streaming different displays.
+    var arrangedSizes: (iPad: CGSize, monitor: CGSize)? {
+        guard isActive, iPadMode == .secondScreen,
+              let primary, primary.state == .connected,
+              monitorSession.state == .connected,
+              !(monitorShowsAllDisplays && iPadDisplayID == nil),
+              monitorShowsAllDisplays || monitorDisplayID != iPadDisplayID,
+              let iPad = pictureSize(iPadDisplayID, canvas: primary.canvasSize),
+              let monitor = pictureSize(monitorShowsAllDisplays ? nil : monitorDisplayID,
+                                        canvas: monitorSession.canvasSize) else { return nil }
+        return (iPad, monitor)
+    }
+
+    /// Sizes for the arrangement editor: the live pictures when both
+    /// stream, else typical shapes so it can be set up ahead of time.
+    var arrangementPreviewSizes: (iPad: CGSize, monitor: CGSize) {
+        if let sizes = arrangedSizes { return sizes }
+        let iPad = primary.flatMap { pictureSize(iPadDisplayID, canvas: $0.canvasSize) }
+        let monitor = pictureSize(monitorShowsAllDisplays ? nil : monitorDisplayID,
+                                  canvas: monitorSession.canvasSize)
+        return (iPad ?? CGSize(width: 1512, height: 982), monitor ?? CGSize(width: 1920, height: 1080))
+    }
+
+    /// Name of a host display for labels (nil = all displays).
+    func displayName(_ id: UInt32?) -> String {
+        guard let id else { return "All displays" }
+        guard let display = pickerDisplays.first(where: { $0.id == id }) else { return "Display" }
+        return display.name.isEmpty ? "\(display.width)×\(display.height)" : display.name
+    }
+
+    /// Link handed to the iPad's input view so its trackpad cursor can
+    /// cross onto the monitor (Second screen mode only).
+    var secondScreenLink: InputCaptureView.TrackpadLink? {
+        guard let sizes = arrangedSizes else { return nil }
+        let rects = arrangement.rects(iPad: sizes.iPad, monitor: sizes.monitor)
+        return .init(localRect: rects.iPad, remoteRect: rects.monitor,
+                     remoteCanvasSize: monitorSession.canvasSize)
     }
 
     /// Displays offered in the monitor picker: the monitor session's own
@@ -205,6 +328,7 @@ final class ExternalDisplayController: ObservableObject {
         quickRejects = 0
         hasBeenLive = false
         monitorDisplayID = nil
+        monitorShowsAllDisplays = false
         if isParked { status = .idle }
 
         primaryCancellables.removeAll()
@@ -245,15 +369,19 @@ final class ExternalDisplayController: ObservableObject {
         let connected = sceneAttached && sceneForeground
         guard connected != isMonitorConnected else { return }
         isMonitorConnected = connected
-        if !connected { monitorCursor = nil }
+        if !connected {
+            monitorCursor = nil
+            cursorOnMonitor = false
+        }
         reconcile()
     }
 
     // MARK: - User actions
 
-    /// Point the monitor at a host display.
-    func selectMonitorDisplay(_ id: UInt32) {
+    /// Point the monitor at a host display, or at all of them (nil).
+    func selectMonitorDisplay(_ id: UInt32?) {
         monitorDisplayID = id
+        monitorShowsAllDisplays = id == nil
         guard monitorSession.state == .connected else { return }
         monitorSession.resetDecodePipeline()
         controlRepeater.send(.setActiveDisplay(displayId: id)) { [weak monitorSession] in
@@ -378,7 +506,7 @@ final class ExternalDisplayController: ObservableObject {
         sawWelcome = true
         guard needsDisplayApply, monitorSession.state == .connected else { return }
         needsDisplayApply = false
-        let id = resolveMonitorDisplay(in: displays)
+        let id = monitorShowsAllDisplays ? nil : resolveMonitorDisplay(in: displays)
         monitorDisplayID = id
         monitorSession.resetDecodePipeline()
         controlRepeater.send(.setActiveDisplay(displayId: id)) { [weak monitorSession] in
@@ -406,10 +534,76 @@ final class ExternalDisplayController: ObservableObject {
         let fps = defaults.object(forKey: "stream.fps") as? Int ?? 30
         let bitrate = defaults.object(forKey: "stream.bitrateKbps") as? Int ?? 5_000
         let maxDimension = defaults.object(forKey: "stream.maxDimension") as? Int ?? 1920
-        monitorSession.sendControl(.setStreamSettings(
+        applyStreamSettings(
             fps: UInt32(fps),
             bitrateKbps: UInt32(bitrate),
             maxDimension: UInt32(maxDimension)
+        )
+    }
+
+    /// Push a live settings change (the gear menu) to the monitor
+    /// connection too. In Trackpad mode the iPad's own session is paused,
+    /// so without this the monitor only picked changes up on reconnect.
+    func applyStreamSettings(fps: UInt32, bitrateKbps: UInt32, maxDimension: UInt32) {
+        guard monitorSession.state == .connected else { return }
+        monitorSession.sendControl(.setStreamSettings(
+            fps: fps,
+            bitrateKbps: bitrateKbps,
+            maxDimension: maxDimension
         ))
+    }
+}
+
+/// Where the monitor's picture sits relative to the iPad's, like macOS
+/// "Arrange Displays": on one edge, slid along it. Geometry lives in a
+/// shared space with the iPad's picture at the origin at native size.
+struct DisplayArrangement: Codable, Equatable {
+    enum Edge: String, Codable { case top, bottom, left, right }
+
+    var edge: Edge = .top
+    /// The monitor's center along the shared edge, relative to the
+    /// iPad's center, as a fraction of the iPad's length on that axis.
+    var offset: CGFloat = 0
+
+    func rects(iPad: CGSize, monitor: CGSize) -> (iPad: CGRect, monitor: CGRect) {
+        let ipad = CGRect(origin: .zero, size: iPad)
+        let along = Self.clampedOffset(offset, edge: edge, iPad: iPad, monitor: monitor)
+        let origin: CGPoint
+        switch edge {
+        case .top, .bottom:
+            let x = iPad.width / 2 + along * iPad.width - monitor.width / 2
+            origin = CGPoint(x: x, y: edge == .top ? -monitor.height : iPad.height)
+        case .left, .right:
+            let y = iPad.height / 2 + along * iPad.height - monitor.height / 2
+            origin = CGPoint(x: edge == .left ? -monitor.width : iPad.width, y: y)
+        }
+        return (ipad, CGRect(origin: origin, size: monitor))
+    }
+
+    /// Snap a dragged monitor center (in arrangement space) to the
+    /// nearest iPad edge, keeping at least a sliver of shared edge.
+    static func snapped(monitorCenter c: CGPoint, iPad: CGSize, monitor: CGSize) -> Self {
+        let dx = (c.x - iPad.width / 2) / max((iPad.width + monitor.width) / 2, 1)
+        let dy = (c.y - iPad.height / 2) / max((iPad.height + monitor.height) / 2, 1)
+        var result = Self()
+        if abs(dy) >= abs(dx) {
+            result.edge = dy < 0 ? .top : .bottom
+            result.offset = (c.x - iPad.width / 2) / max(iPad.width, 1)
+        } else {
+            result.edge = dx < 0 ? .left : .right
+            result.offset = (c.y - iPad.height / 2) / max(iPad.height, 1)
+        }
+        result.offset = clampedOffset(result.offset, edge: result.edge, iPad: iPad, monitor: monitor)
+        return result
+    }
+
+    private static func clampedOffset(_ offset: CGFloat, edge: Edge, iPad: CGSize, monitor: CGSize) -> CGFloat {
+        let (a, b) = edge == .top || edge == .bottom
+            ? (iPad.width, monitor.width) : (iPad.height, monitor.height)
+        guard a > 0 else { return 0 }
+        // Centers may sit at most this far apart and still share 10% of
+        // the shorter edge.
+        let limit = max((a + b) / 2 - 0.1 * min(a, b), 0) / a
+        return min(max(offset, -limit), limit)
     }
 }

@@ -115,7 +115,8 @@ struct HostSettingsView: View {
 
 @main
 struct HostApp: App {
-    @StateObject private var hostManager = HostManager()
+    @NSApplicationDelegateAdaptor(HostAppDelegate.self) private var appDelegate
+    @StateObject private var hostManager = HostManager.shared
     @AppStorage("host.showSettings") private var showSettings = false
 
     var body: some Scene {

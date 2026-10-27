@@ -101,6 +101,26 @@ notarytool keychain profile — setup steps are in `--help`. For a local,
 un-notarized test build:
 `SIGN_IDENTITY="Apple Development: …" ./Scripts/build-host-dmg.sh --skip-notarize`.
 
+## Controlling FastPort Host from a script / agent
+
+The Host app handles `fastport-host://` URLs (`Host/HostControl.swift`);
+opening one launches the app if needed:
+
+```bash
+open "fastport-host://stream/on"      # stream/off, stream/toggle
+open "fastport-host://set?fps=60&bitrate=20000&resolution=1920"
+open "fastport-host://status"
+open "fastport-host://quit"
+```
+
+`set` keys: `fps`, `bitrate` (kbps), `resolution` (0 = native),
+`latencyHUD`, `virtualDisplay`, `virtualDisplaySize` (e.g. `2560x1440`),
+`hiDPI`; it is all-or-nothing and restarts a running stream. Each command
+appends its result and the full state to
+`~/Library/Logs/fastport-host-control.log` — read that to confirm.
+LaunchServices ignores app builds under `/tmp`, so a dev build must live
+elsewhere (e.g. `build/`) for the scheme to resolve.
+
 ## Gotchas
 - **Don't pipe a build/error count through `grep -c` in an `&&` chain** —
   `grep -c` exits non-zero when the count is 0, which silently aborts the

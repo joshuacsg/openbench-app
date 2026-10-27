@@ -64,6 +64,40 @@ public final class InputCaptureView: UIView, UIKeyInput, UIPointerInteractionDel
     /// the letterbox area would map off the host display.
     public var constrainTrackpadToCanvas = false
 
+    /// Second-screen link: another host display, arranged beside this
+    /// view's canvas, that the trackpad cursor can travel onto (the
+    /// external monitor while the iPad shows its own display). Both rects
+    /// share one arrangement space; see DisplayArrangement.
+    public struct TrackpadLink: Equatable {
+        public var localRect: CGRect
+        public var remoteRect: CGRect
+        public var remoteCanvasSize: CGSize
+
+        public init(localRect: CGRect, remoteRect: CGRect, remoteCanvasSize: CGSize) {
+            self.localRect = localRect
+            self.remoteRect = remoteRect
+            self.remoteCanvasSize = remoteCanvasSize
+        }
+    }
+
+    public var trackpadLink: TrackpadLink? {
+        didSet {
+            guard trackpadLink != oldValue, linkedCursor != nil else { return }
+            // The link changed under a cursor on the linked display.
+            returnFromLinkedDisplay()
+        }
+    }
+
+    /// The cursor moved onto (true) or back off (false) the linked
+    /// display. Called before any input meant for it is sent, so the
+    /// owner can re-route the InputManager.
+    public var onLinkedDisplayActive: ((Bool) -> Void)?
+    /// Cursor on the linked display in its canvas pixels; nil = left it.
+    public var onLinkedCursorMoved: ((CGPoint?) -> Void)?
+    /// Cursor position in arrangement space while it is on the linked
+    /// display; nil while it is on this view's canvas.
+    private var linkedCursor: CGPoint?
+
     // MARK: - Viewport zoom/pan state
 
     /// Current zoom scale (1.0 = fit to view).
@@ -112,6 +146,7 @@ public final class InputCaptureView: UIView, UIKeyInput, UIPointerInteractionDel
         didSet {
             guard trackpadMode != oldValue else { return }
             resetTrackpadGestures(sendCancellation: trackpadGestures && oldValue)
+            if !trackpadMode { returnFromLinkedDisplay() }
             if trackpadMode {
                 if !trackpadCursorInitialized {
                     trackpadCursor = CGPoint(x: bounds.midX, y: bounds.midY)
@@ -220,6 +255,8 @@ public final class InputCaptureView: UIView, UIKeyInput, UIPointerInteractionDel
         guard let touch = touches.first else { return }
 
         if touch.type == .pencil {
+            // Pencil input lands where it touches, on this display.
+            returnFromLinkedDisplay()
             handlePencilBegan(touch)
             return
         }
@@ -245,6 +282,8 @@ public final class InputCaptureView: UIView, UIKeyInput, UIPointerInteractionDel
             trackpadTouchBegan(touch)
             return
         }
+        // Absolute input (touchscreen, mouse) lands on this display.
+        returnFromLinkedDisplay()
 
         // Single finger or trackpad click → left click.
         let viewPt = touch.location(in: self)
@@ -448,12 +487,15 @@ public final class InputCaptureView: UIView, UIKeyInput, UIPointerInteractionDel
             trackpadTouchMoved = true
             if dragLockArmed {
                 trackpadDragging = true
-                let pos = mapToCanvas(trackpadCursor)
+                let pos = cursorCanvasPoint
                 inputManager?.mouseMove(x: Int32(pos.x), y: Int32(pos.y))
                 inputManager?.mouseButton(0, pressed: true)
             }
         }
         guard trackpadTouchMoved else { return }
+
+        let step = CGPoint(x: dx * Self.trackpadSensitivity, y: dy * Self.trackpadSensitivity)
+        if let link = trackpadLink, moveAcrossLink(step, link) { return }
 
         let range = trackpadCursorBounds
         trackpadCursor.x = min(max(trackpadCursor.x + dx * Self.trackpadSensitivity, range.minX), range.maxX)
@@ -469,7 +511,7 @@ public final class InputCaptureView: UIView, UIKeyInput, UIPointerInteractionDel
             trackpadDragging = false
         } else if !trackpadTouchMoved {
             // A tap → left click at the cursor's current position.
-            let pos = mapToCanvas(trackpadCursor)
+            let pos = cursorCanvasPoint
             inputManager?.mouseMove(x: Int32(pos.x), y: Int32(pos.y))
             inputManager?.mouseButton(0, pressed: true)
             inputManager?.mouseButton(0, pressed: false)
@@ -488,9 +530,105 @@ public final class InputCaptureView: UIView, UIKeyInput, UIPointerInteractionDel
         onCanvasPointerMoved?(viewPoint.map(mapToCanvas))
     }
 
+    /// The tracked cursor in the canvas pixels of whichever display it
+    /// is on (input is routed to that display's session).
+    private var cursorCanvasPoint: CGPoint {
+        if let linkedCursor, let link = trackpadLink {
+            return remoteCanvasPoint(linkedCursor, link)
+        }
+        return mapToCanvas(trackpadCursor)
+    }
+
+    /// Arrangement units per canvas pixel of this view's canvas.
+    private func arrangementScale(_ link: TrackpadLink) -> CGFloat {
+        canvasSize.width > 0 ? link.localRect.width / canvasSize.width : 1
+    }
+
+    private func remoteCanvasPoint(_ p: CGPoint, _ link: TrackpadLink) -> CGPoint {
+        CGPoint(
+            x: (p.x - link.remoteRect.minX) * link.remoteCanvasSize.width / link.remoteRect.width,
+            y: (p.y - link.remoteRect.minY) * link.remoteCanvasSize.height / link.remoteRect.height
+        )
+    }
+
+    /// Move the cursor by `step` (view points) across the link. Returns
+    /// false when the move stays on this view's canvas, for the regular
+    /// clamped path. A held button never crosses: the drag would be
+    /// split across two host connections.
+    private func moveAcrossLink(_ step: CGPoint, _ link: TrackpadLink) -> Bool {
+        guard canvasSize.width > 0, canvasSize.height > 0,
+              link.localRect.width > 0, link.remoteRect.width > 0, link.remoteRect.height > 0 else { return false }
+        let scale = arrangementScale(link)
+
+        if let current = linkedCursor {
+            // Finger travel keeps the feel it has on this canvas.
+            let perPoint = scale / max(viewToCanvasScale, 0.0001)
+            var p = CGPoint(x: current.x + step.x * perPoint, y: current.y + step.y * perPoint)
+            if !trackpadDragging, !link.remoteRect.contains(p), link.localRect.contains(p) {
+                let canvasPt = CGPoint(x: (p.x - link.localRect.minX) / scale,
+                                       y: (p.y - link.localRect.minY) / scale)
+                let viewPt = mapFromCanvas(canvasPt)
+                let range = trackpadCursorBounds
+                trackpadCursor = CGPoint(x: min(max(viewPt.x, range.minX), range.maxX),
+                                         y: min(max(viewPt.y, range.minY), range.maxY))
+                returnFromLinkedDisplay()
+                let pos = mapToCanvas(trackpadCursor)
+                inputManager?.mouseMove(x: Int32(pos.x), y: Int32(pos.y))
+                reportPointer(trackpadCursor)
+                return true
+            }
+            let r = link.remoteRect
+            p.x = min(max(p.x, r.minX), r.maxX - 0.01)
+            p.y = min(max(p.y, r.minY), r.maxY - 0.01)
+            linkedCursor = p
+            sendLinkedCursor(link)
+            return true
+        }
+
+        guard !trackpadDragging else { return false }
+        let candidate = mapToCanvas(CGPoint(x: trackpadCursor.x + step.x, y: trackpadCursor.y + step.y))
+        // Closed bounds: a cursor resting on the far edge (where the
+        // clamp leaves it) must cross only by moving past it.
+        let leftCanvas = candidate.x < 0 || candidate.y < 0
+            || candidate.x > canvasSize.width || candidate.y > canvasSize.height
+        let p = CGPoint(x: link.localRect.minX + candidate.x * scale,
+                        y: link.localRect.minY + candidate.y * scale)
+        guard leftCanvas, link.remoteRect.contains(p) else { return false }
+        reportPointer(nil)
+        linkedCursor = p
+        onLinkedDisplayActive?(true)
+        sendLinkedCursor(link)
+        return true
+    }
+
+    private func sendLinkedCursor(_ link: TrackpadLink) {
+        guard let linkedCursor else { return }
+        let pos = remoteCanvasPoint(linkedCursor, link)
+        inputManager?.mouseMove(x: Int32(pos.x), y: Int32(pos.y))
+        onLinkedCursorMoved?(pos)
+    }
+
+    /// Bring the cursor (and input routing) back to this view's canvas.
+    private func returnFromLinkedDisplay() {
+        guard linkedCursor != nil else { return }
+        linkedCursor = nil
+        onLinkedCursorMoved?(nil)
+        onLinkedDisplayActive?(false)
+        if trackpadMode { reportPointer(trackpadCursor) }
+    }
+
     /// Region the trackpad cursor may travel: the whole view, or the
-    /// aspect-fitted canvas when `constrainTrackpadToCanvas` is set.
+    /// aspect-fitted canvas when `constrainTrackpadToCanvas` is set or a
+    /// linked display is arranged beside it (so it crosses at the
+    /// picture's edge, not the letterbox's).
     private var trackpadCursorBounds: CGRect {
+        if trackpadLink != nil, canvasSize.width > 0, canvasSize.height > 0 {
+            let a = mapFromCanvas(.zero)
+            let b = mapFromCanvas(CGPoint(x: canvasSize.width, y: canvasSize.height))
+            let canvas = CGRect(x: a.x, y: a.y, width: b.x - a.x, height: b.y - a.y)
+            let visible = canvas.intersection(bounds)
+            return visible.isNull ? bounds : visible
+        }
         guard constrainTrackpadToCanvas,
               canvasSize.width > 0, canvasSize.height > 0,
               bounds.width > 0, bounds.height > 0 else { return bounds }
@@ -540,6 +678,7 @@ public final class InputCaptureView: UIView, UIKeyInput, UIPointerInteractionDel
     @objc private func handleHover(_ gesture: UIHoverGestureRecognizer) {
         guard !(usesTrackpadGestures && (multiFingerSequence || indirectScrollActive)),
               gesture.state == .changed || gesture.state == .began else { return }
+        returnFromLinkedDisplay()
         let viewPt = gesture.location(in: self)
         let pos = mapToCanvas(viewPt)
         inputManager?.mouseMove(x: Int32(pos.x), y: Int32(pos.y))
@@ -847,6 +986,40 @@ public final class InputCaptureView: UIView, UIKeyInput, UIPointerInteractionDel
     }
 
     // MARK: - Coordinate mapping
+
+    /// Aspect-fit placement of the canvas in the unzoomed view.
+    private var canvasFit: (scale: CGFloat, offsetX: CGFloat, offsetY: CGFloat) {
+        let viewAspect = bounds.width / bounds.height
+        let canvasAspect = canvasSize.width / canvasSize.height
+        if canvasAspect > viewAspect {
+            let scale = bounds.width / canvasSize.width
+            return (scale, 0, (bounds.height - canvasSize.height * scale) / 2)
+        }
+        let scale = bounds.height / canvasSize.height
+        return (scale, (bounds.width - canvasSize.width * scale) / 2, 0)
+    }
+
+    /// View points per canvas pixel, including zoom.
+    private var viewToCanvasScale: CGFloat {
+        guard canvasSize.width > 0, canvasSize.height > 0,
+              bounds.width > 0, bounds.height > 0 else { return 1 }
+        return canvasFit.scale * viewportScale
+    }
+
+    /// Inverse of mapToCanvas.
+    private func mapFromCanvas(_ point: CGPoint) -> CGPoint {
+        guard canvasSize.width > 0, canvasSize.height > 0,
+              bounds.width > 0, bounds.height > 0 else {
+            return point
+        }
+        let fit = canvasFit
+        let unzoomedX = point.x * fit.scale + fit.offsetX
+        let unzoomedY = point.y * fit.scale + fit.offsetY
+        return CGPoint(
+            x: (unzoomedX - bounds.midX) * viewportScale + bounds.midX + viewportOffset.x,
+            y: (unzoomedY - bounds.midY) * viewportScale + bounds.midY + viewportOffset.y
+        )
+    }
 
     /// Map UIKit view-local point → canvas pixel coordinate.
     /// Accounts for aspect-fit layout AND viewport zoom/pan.

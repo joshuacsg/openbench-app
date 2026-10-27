@@ -325,6 +325,13 @@ public final class FrameReassembler {
         lastRetired = fid
     }
 
+    /// Video-silence deadline after which an incomplete assembly is
+    /// given up on: 2 x RTT, clamped so a 1.7 s RTT spike can't add
+    /// seconds of detection time and a LAN RTT keeps the 60 ms floor.
+    public static func recoveryTimeout(rttMs: UInt32) -> TimeInterval {
+        min(0.25, max(0.06, Double(rttMs) / 500.0))
+    }
+
     /// Called on the receive queue even while the sender is idle. Only
     /// video silence counts: pongs must not keep a broken tail alive.
     public func expireStalledFrames(now: TimeInterval = ProcessInfo.processInfo.systemUptime,
