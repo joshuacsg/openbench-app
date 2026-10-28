@@ -158,25 +158,27 @@ public final class MetalRenderer {
             // available. The decode callback can replace it while we wait.
             inFlight.wait()
             lock.lock()
-            guard let pb = pendingBuffer else {
+            guard let sizing = pendingBuffer else {
                 presentationScheduled = false
                 lock.unlock()
                 inFlight.signal()
                 return
             }
-            pendingBuffer = nil
-            let timestampUs = pendingTimestampUs
             lock.unlock()
-            autoreleasepool { render(pb, timestampUs: timestampUs) }
+            autoreleasepool { render(sizedBy: sizing) }
         }
     }
 
-    private func render(_ pb: CVPixelBuffer, timestampUs: UInt64) {
+    /// Acquire the drawable first and only then take the latest frame:
+    /// nextDrawable() blocks while both drawables are queued or on glass,
+    /// and on 2026-10-28 an iPad at ~44 fps spent a median 16 ms there
+    /// holding a frame that newer decodes had already superseded.
+    private func render(sizedBy sizing: CVPixelBuffer) {
         var submitted = false
         defer { if !submitted { inFlight.signal() } }
 
-        let width = CVPixelBufferGetWidth(pb)
-        let height = CVPixelBufferGetHeight(pb)
+        let width = CVPixelBufferGetWidth(sizing)
+        let height = CVPixelBufferGetHeight(sizing)
 
         // Update the layer's drawable size if the frame resolution changed.
         let drawableSize = CGSize(width: width, height: height)
@@ -189,6 +191,16 @@ public final class MetalRenderer {
         CATransaction.commit()
         geometryLock.unlock()
 
+        guard let drawable = metalLayer.nextDrawable() else { return }
+        lock.lock()
+        guard let pb = pendingBuffer else {
+            lock.unlock()
+            return
+        }
+        pendingBuffer = nil
+        let timestampUs = pendingTimestampUs
+        lock.unlock()
+
         // Create a Metal texture from the CVPixelBuffer.
         var cvTexture: CVMetalTexture?
         let status = CVMetalTextureCacheCreateTextureFromImage(
@@ -197,8 +209,8 @@ public final class MetalRenderer {
             pb,
             nil,
             .bgra8Unorm,
-            width,
-            height,
+            CVPixelBufferGetWidth(pb),
+            CVPixelBufferGetHeight(pb),
             0,
             &cvTexture
         )
@@ -208,8 +220,7 @@ public final class MetalRenderer {
             return
         }
 
-        guard let drawable = metalLayer.nextDrawable(),
-              let commandBuffer = commandQueue.makeCommandBuffer(),
+        guard let commandBuffer = commandQueue.makeCommandBuffer(),
               let blitEncoder = commandBuffer.makeBlitCommandEncoder() else {
             return
         }
