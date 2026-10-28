@@ -5,9 +5,6 @@
 //     a full frame of latency)
 //   - present on decode from a serial render queue, without a main-thread
 //     display-link tick before the compositor's own vsync
-//   - on iOS, an idle display link that only asks for the panel's maximum
-//     refresh (holdsMaxRefreshRate), so ProMotion does not drop its rate
-//     on a 30 fps stream and make each present wait for a slower vsync
 //
 // The input is a CVPixelBuffer (BGRA) from the VTDecompressionSession.
 // We create a Metal texture from it and blit to the drawable.
@@ -97,37 +94,7 @@ public final class MetalRenderer {
         stopped = true
         pendingBuffer = nil
         lock.unlock()
-        #if os(iOS)
-        holdsMaxRefreshRate = false
-        #endif
     }
-
-    #if os(iOS)
-    /// UserDefaults key for the viewer's "hold 120 Hz" setting.
-    public static let holdMaxRefreshKey = "display.holdMaxRefresh"
-
-    private var refreshHold: CADisplayLink?
-
-    /// Keep the panel at its maximum refresh while this renderer is on
-    /// screen. Main thread only.
-    public var holdsMaxRefreshRate = false {
-        didSet {
-            guard holdsMaxRefreshRate != oldValue else { return }
-            refreshHold?.invalidate()
-            refreshHold = nil
-            guard holdsMaxRefreshRate else { return }
-            // The link retains its target, so give it one that is not us.
-            let link = CADisplayLink(target: RefreshHoldTarget(), selector: #selector(RefreshHoldTarget.tick))
-            link.preferredFrameRateRange = CAFrameRateRange(minimum: 80, maximum: 120, preferred: 120)
-            link.add(to: .main, forMode: .common)
-            refreshHold = link
-        }
-    }
-
-    private final class RefreshHoldTarget: NSObject {
-        @objc func tick() {}
-    }
-    #endif
 
     /// Schedule at most one drain, even if the GPU or drawable is busy.
     public func presentIfNeeded() {

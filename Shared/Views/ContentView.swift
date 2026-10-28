@@ -1197,7 +1197,6 @@ struct InputCaptureViewRepresentable: UIViewRepresentable {
 /// UIViewRepresentable that hosts the MetalRenderer's CAMetalLayer.
 struct MetalVideoView: UIViewRepresentable {
     @ObservedObject var session: StreamSession
-    @AppStorage(MetalRenderer.holdMaxRefreshKey) private var holdMaxRefresh = true
 
     func makeUIView(context: Context) -> MetalHostView {
         let view = MetalHostView()
@@ -1207,13 +1206,10 @@ struct MetalVideoView: UIViewRepresentable {
         session.onDecodedFrame = { [weak renderer = view.renderer] pb, ts in
             renderer?.enqueue(pb, timestampUs: ts)
         }
-        view.renderer?.holdsMaxRefreshRate = holdMaxRefresh
         return view
     }
 
-    func updateUIView(_ view: MetalHostView, context: Context) {
-        view.renderer?.holdsMaxRefreshRate = holdMaxRefresh
-    }
+    func updateUIView(_ view: MetalHostView, context: Context) {}
 
     class MetalHostView: UIView {
         var renderer: MetalRenderer?

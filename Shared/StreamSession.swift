@@ -436,16 +436,10 @@ public final class StreamSession: ObservableObject {
     private func reportLatency() {
         guard let s = latencyProbe.takeSummary() else { return }
         stats.glassToGlassMs = s.totalMs
-#if os(iOS)
-        let holdMaxRefresh = UserDefaults.standard.object(forKey: MetalRenderer.holdMaxRefreshKey) as? Bool ?? true
-#else
-        let holdMaxRefresh = false
-#endif
         sendControl(.viewerTiming(frames: UInt32(clamping: s.frames), clockErrMs: s.clockErrMs,
                                   hostNetMs: s.hostNetMs, decodeMs: s.decodeMs,
                                   renderMs: s.renderMs, glassMs: s.glassMs,
-                                  totalMs: s.totalMs, totalP95Ms: s.totalP95Ms,
-                                  holdMaxRefresh: holdMaxRefresh))
+                                  totalMs: s.totalMs, totalP95Ms: s.totalP95Ms))
     }
 
     /// Called by the renderer when a frame reaches the glass.
