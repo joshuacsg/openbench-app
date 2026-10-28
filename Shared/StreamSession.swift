@@ -105,6 +105,9 @@ public final class StreamSession: ObservableObject {
         public var hostPdMs: Double? = nil
         /// Host send-queue delay (encode done → sent), in ms, rolling.
         public var hostQueueMs: Double? = nil
+        /// Capture → on glass, median of the last report window. `nil`
+        /// until the host's Pong carries its clock (`host_us`).
+        public var glassToGlassMs: Double? = nil
     }
 
     private var pixelConnection: NWConnection?
@@ -125,6 +128,8 @@ public final class StreamSession: ObservableObject {
     private var pingTimer: Timer?
     private var pendingPingNonce: UInt64?
     private var pendingPingTime: CFAbsoluteTime?
+    /// Viewer-side motion-to-photon stamps (RFC-0019).
+    private let latencyProbe = LatencyProbe()
 
     // Loss recovery: ask the host for a keyframe when the reassembler
     // discards an incomplete frame, instead of showing corruption /
@@ -337,6 +342,7 @@ public final class StreamSession: ObservableObject {
             self.decodeCountLock.lock()
             self.decodedSinceLastTick += 1
             self.decodeCountLock.unlock()
+            self.latencyProbe.decoded(captureUs: ts, at: CACurrentMediaTime())
 
             // Infer canvas size from the first decoded frame (and on
             // change) so InputCaptureView.mapToCanvas() works even when
@@ -394,6 +400,7 @@ public final class StreamSession: ObservableObject {
                 self.decodeCountLock.unlock()
                 self.stats.currentFps = Double(n)
                 self.stats.framesDecoded += UInt64(n)
+                self.reportLatency()
             }
         }
         // .common keeps stats/ping alive during UI tracking
@@ -417,11 +424,28 @@ public final class StreamSession: ObservableObject {
                 let nonce = UInt64.random(in: 0...UInt64.max)
                 self.pendingPingNonce = nonce
                 self.pendingPingTime = CFAbsoluteTimeGetCurrent()
+                self.latencyProbe.pingSent(nonce: nonce, at: CACurrentMediaTime())
                 self.sendControl(.ping(nonce: nonce))
             }
         }
         RunLoop.main.add(timer, forMode: .common)
         pingTimer = timer
+    }
+
+    /// Publish the probe's window summary to the HUD and the host log.
+    private func reportLatency() {
+        guard let s = latencyProbe.takeSummary() else { return }
+        stats.glassToGlassMs = s.totalMs
+        sendControl(.viewerTiming(frames: UInt32(clamping: s.frames), clockErrMs: s.clockErrMs,
+                                  hostNetMs: s.hostNetMs, decodeMs: s.decodeMs,
+                                  renderMs: s.renderMs, glassMs: s.glassMs,
+                                  totalMs: s.totalMs, totalP95Ms: s.totalP95Ms,
+                                  worst: s.worst))
+    }
+
+    /// Called by the renderer when a frame reaches the glass.
+    public func framePresented(timestampUs: UInt64, submitted: CFTimeInterval, onGlass: CFTimeInterval) {
+        latencyProbe.presented(captureUs: timestampUs, submitted: submitted, onGlass: onGlass)
     }
 
     private func stopPingLoop() {
@@ -489,6 +513,7 @@ public final class StreamSession: ObservableObject {
         // Correlate host timing for this frame (no-op unless the host is
         // emitting FrameTiming). frame.timestampUs IS the capture_us key.
         correlateHostTiming(captureUs: frame.timestampUs)
+        latencyProbe.received(captureUs: frame.timestampUs, at: CACurrentMediaTime())
 
         if isDecodePaused { return }
         if frame.isKeyframe {
@@ -769,6 +794,7 @@ public final class StreamSession: ObservableObject {
         // A retry keeps the growing backoff; a fresh connect resets it.
         if !isRetry { reconnectDelay = 0.5 }
 
+        latencyProbe.reset()
         onPong = { [weak self] nonce in
             guard let self,
                   nonce == self.pendingPingNonce,
@@ -880,6 +906,7 @@ public final class StreamSession: ObservableObject {
         frameTimingOrder.removeAll()
         rollingHostPdMs = nil
         rollingHostQueueMs = nil
+        latencyProbe.resetFrames()
     }
 
     public func disconnect() {
@@ -1209,6 +1236,11 @@ public final class StreamSession: ObservableObject {
         case "Pong":
             guard let fields = value as? [String: Any],
                   let nonce  = fields["nonce"] as? UInt64 else { return }
+            // Stamp before the main-actor hop; it would inflate the RTT
+            // that bounds the clock offset.
+            if let hostUs = fields["host_us"] as? UInt64 {
+                latencyProbe.pong(nonce: nonce, hostUs: hostUs, at: CACurrentMediaTime())
+            }
             Task { @MainActor [weak self] in
                 self?.onPong?(nonce)
             }

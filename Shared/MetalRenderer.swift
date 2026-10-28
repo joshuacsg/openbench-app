@@ -6,8 +6,9 @@
 //   - present on decode from a serial render queue, without a main-thread
 //     display-link tick before the compositor's own vsync
 //
-// The input is a CVPixelBuffer (BGRA) from the VTDecompressionSession.
-// We create a Metal texture from it and blit to the drawable.
+// The input is a CVPixelBuffer (NV12, BT.709 limited range) from the
+// VTDecompressionSession. Its two planes are sampled as Metal textures
+// and converted to RGB in a fragment shader while drawing the drawable.
 
 import Foundation
 import Metal
@@ -22,10 +23,17 @@ public final class MetalRenderer {
     private let device: MTLDevice
     private let commandQueue: MTLCommandQueue
     private let textureCache: CVMetalTextureCache
+    private let pipeline: MTLRenderPipelineState
     public let metalLayer: CAMetalLayer
 
     /// One latest-frame slot, rather than one queued closure per frame.
     private var pendingBuffer: CVPixelBuffer?
+    private var pendingTimestampUs: UInt64 = 0
+
+    /// Called from Metal's presented handler with the frame's capture
+    /// timestamp, when it was submitted and when it reached the glass
+    /// (CACurrentMediaTime seconds). Set before frames are enqueued.
+    public var onPresented: ((_ timestampUs: UInt64, _ submitted: CFTimeInterval, _ onGlass: CFTimeInterval) -> Void)?
     private let lock = NSLock()
 
     private var presentationScheduled = false
@@ -54,10 +62,26 @@ public final class MetalRenderer {
         }
         self.textureCache = cache
 
+        // Compiled from source: a few ms once, and no .metal file to keep
+        // registered in both Xcode projects.
+        let descriptor = MTLRenderPipelineDescriptor()
+        descriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
+        guard let library = try? device.makeLibrary(source: Self.shaderSource, options: nil),
+              let vertex = library.makeFunction(name: "fullscreen_vertex"),
+              let fragment = library.makeFunction(name: "nv12_fragment") else {
+            return nil
+        }
+        descriptor.vertexFunction = vertex
+        descriptor.fragmentFunction = fragment
+        guard let pipeline = try? device.makeRenderPipelineState(descriptor: descriptor) else {
+            return nil
+        }
+        self.pipeline = pipeline
+
         let layer = CAMetalLayer()
         layer.device = device
         layer.pixelFormat = .bgra8Unorm
-        layer.framebufferOnly = false  // must be false for blit encoder copy
+        layer.framebufferOnly = true
         layer.maximumDrawableCount = 2 // Third drawable = +1 frame latency
         layer.contentsGravity = .resizeAspect
         layer.allowsNextDrawableTimeout = true
@@ -69,13 +93,14 @@ public final class MetalRenderer {
 
     /// Enqueue a decoded frame for immediate off-main presentation.
     /// Thread-safe; called from the decode callback.
-    public func enqueue(_ pixelBuffer: CVPixelBuffer) {
+    public func enqueue(_ pixelBuffer: CVPixelBuffer, timestampUs: UInt64 = 0) {
         lock.lock()
         guard !stopped else {
             lock.unlock()
             return
         }
         pendingBuffer = pixelBuffer
+        pendingTimestampUs = timestampUs
         lock.unlock()
         presentIfNeeded()
     }
@@ -118,24 +143,27 @@ public final class MetalRenderer {
             // available. The decode callback can replace it while we wait.
             inFlight.wait()
             lock.lock()
-            guard let pb = pendingBuffer else {
+            guard let sizing = pendingBuffer else {
                 presentationScheduled = false
                 lock.unlock()
                 inFlight.signal()
                 return
             }
-            pendingBuffer = nil
             lock.unlock()
-            autoreleasepool { render(pb) }
+            autoreleasepool { render(sizedBy: sizing) }
         }
     }
 
-    private func render(_ pb: CVPixelBuffer) {
+    /// Acquire the drawable first and only then take the latest frame:
+    /// nextDrawable() blocks while both drawables are queued or on glass,
+    /// and on 2026-10-28 an iPad at ~44 fps spent a median 16 ms there
+    /// holding a frame that newer decodes had already superseded.
+    private func render(sizedBy sizing: CVPixelBuffer) {
         var submitted = false
         defer { if !submitted { inFlight.signal() } }
 
-        let width = CVPixelBufferGetWidth(pb)
-        let height = CVPixelBufferGetHeight(pb)
+        let width = CVPixelBufferGetWidth(sizing)
+        let height = CVPixelBufferGetHeight(sizing)
 
         // Update the layer's drawable size if the frame resolution changed.
         let drawableSize = CGSize(width: width, height: height)
@@ -148,61 +176,100 @@ public final class MetalRenderer {
         CATransaction.commit()
         geometryLock.unlock()
 
-        // Create a Metal texture from the CVPixelBuffer.
-        var cvTexture: CVMetalTexture?
-        let status = CVMetalTextureCacheCreateTextureFromImage(
-            kCFAllocatorDefault,
-            textureCache,
-            pb,
-            nil,
-            .bgra8Unorm,
-            width,
-            height,
-            0,
-            &cvTexture
-        )
-        guard status == kCVReturnSuccess,
-              let cvTexture = cvTexture,
-              let sourceTexture = CVMetalTextureGetTexture(cvTexture) else {
+        guard let drawable = metalLayer.nextDrawable() else { return }
+        lock.lock()
+        guard let pb = pendingBuffer else {
+            lock.unlock()
+            return
+        }
+        pendingBuffer = nil
+        let timestampUs = pendingTimestampUs
+        lock.unlock()
+
+        guard let luma = texture(pb, plane: 0, format: .r8Unorm),
+              let chroma = texture(pb, plane: 1, format: .rg8Unorm),
+              let lumaTexture = CVMetalTextureGetTexture(luma),
+              let chromaTexture = CVMetalTextureGetTexture(chroma) else {
             return
         }
 
-        guard let drawable = metalLayer.nextDrawable(),
-              let commandBuffer = commandQueue.makeCommandBuffer(),
-              let blitEncoder = commandBuffer.makeBlitCommandEncoder() else {
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = drawable.texture
+        pass.colorAttachments[0].loadAction = .dontCare
+        pass.colorAttachments[0].storeAction = .store
+        guard let commandBuffer = commandQueue.makeCommandBuffer(),
+              let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else {
             return
         }
-
-        // Blit from the source texture (decoded frame) to the drawable.
-        let sourceSize = MTLSizeMake(
-            min(sourceTexture.width, drawable.texture.width),
-            min(sourceTexture.height, drawable.texture.height),
-            1
-        )
-        blitEncoder.copy(
-            from: sourceTexture,
-            sourceSlice: 0,
-            sourceLevel: 0,
-            sourceOrigin: MTLOriginMake(0, 0, 0),
-            sourceSize: sourceSize,
-            to: drawable.texture,
-            destinationSlice: 0,
-            destinationLevel: 0,
-            destinationOrigin: MTLOriginMake(0, 0, 0)
-        )
-        blitEncoder.endEncoding()
+        encoder.setRenderPipelineState(pipeline)
+        encoder.setFragmentTexture(lumaTexture, index: 0)
+        encoder.setFragmentTexture(chromaTexture, index: 1)
+        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+        encoder.endEncoding()
         // Metal retains its texture, but not the CVMetalTexture wrapper
-        // or pixel buffer. Keep both alive until the blit has finished.
+        // or pixel buffer. Keep them alive until the draw has finished.
         let slots = inFlight
         let cache = textureCache
-        commandBuffer.addCompletedHandler { [pb, cvTexture] _ in
-            withExtendedLifetime((pb, cvTexture)) {
+        commandBuffer.addCompletedHandler { [pb, luma, chroma] _ in
+            withExtendedLifetime((pb, luma, chroma)) {
                 CVMetalTextureCacheFlush(cache, 0)
             }
             slots.signal()
+        }
+        if let onPresented {
+            let submittedAt = CACurrentMediaTime()
+            drawable.addPresentedHandler { d in
+                // 0 when the drawable was dropped instead of shown.
+                if d.presentedTime > 0 { onPresented(timestampUs, submittedAt, d.presentedTime) }
+            }
         }
         commandBuffer.present(drawable)
         submitted = true
         commandBuffer.commit()
     }
+
+    private func texture(_ pb: CVPixelBuffer, plane: Int, format: MTLPixelFormat) -> CVMetalTexture? {
+        var texture: CVMetalTexture?
+        let status = CVMetalTextureCacheCreateTextureFromImage(
+            kCFAllocatorDefault,
+            textureCache,
+            pb,
+            nil,
+            format,
+            CVPixelBufferGetWidthOfPlane(pb, plane),
+            CVPixelBufferGetHeightOfPlane(pb, plane),
+            plane,
+            &texture
+        )
+        return status == kCVReturnSuccess ? texture : nil
+    }
+
+    /// One triangle covering the drawable; BT.709 limited range → RGB,
+    /// matching the host encoder's VUI (flux-codec hevc.rs).
+    private static let shaderSource = """
+    #include <metal_stdlib>
+    using namespace metal;
+
+    struct Varyings { float4 position [[position]]; float2 uv; };
+
+    vertex Varyings fullscreen_vertex(uint id [[vertex_id]]) {
+        float2 uv = float2((id << 1) & 2, id & 2);
+        Varyings out;
+        out.position = float4(uv * float2(2, -2) + float2(-1, 1), 0, 1);
+        out.uv = uv;
+        return out;
+    }
+
+    fragment half4 nv12_fragment(Varyings in [[stage_in]],
+                                 texture2d<half> luma [[texture(0)]],
+                                 texture2d<half> chroma [[texture(1)]]) {
+        constexpr sampler s(filter::linear, address::clamp_to_edge);
+        half y = (luma.sample(s, in.uv).r - 16.0h / 255.0h) * (255.0h / 219.0h);
+        half2 c = (chroma.sample(s, in.uv).rg - 128.0h / 255.0h) * (255.0h / 224.0h);
+        half3 rgb = half3(y + 1.5748h * c.y,
+                          y - 0.1873h * c.x - 0.4681h * c.y,
+                          y + 1.8556h * c.x);
+        return half4(saturate(rgb), 1.0h);
+    }
+    """
 }

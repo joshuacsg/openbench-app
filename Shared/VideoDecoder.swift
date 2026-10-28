@@ -6,7 +6,8 @@
 // the Rust FFI. Use Swift's own VTDecompressionSession."
 //
 // Input:  Annex-B byte stream (0x00 0x00 0x00 0x01 start codes)
-// Output: CVPixelBuffer (BGRA or NV12, hardware decides)
+// Output: CVPixelBuffer, NV12 (420v) — the decoder's native format, so
+//         VT runs no colour-conversion pass; MetalRenderer converts
 //
 // The first call must include a keyframe with VPS/SPS/PPS so the
 // decoder can construct its CMVideoFormatDescription. Subsequent
@@ -211,9 +212,11 @@ public final class HEVCDecoder {
         formatDesc = desc
         waitingForKeyframe = false
 
-        // Create a new decompression session.
+        // Create a new decompression session. The host sends 8-bit 4:2:0
+        // BT.709 limited range; asking for that format keeps VT from
+        // converting to BGRA on the decode path.
         let outputAttrs: [String: Any] = [
-            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
             kCVPixelBufferMetalCompatibilityKey as String: true,
             kCVPixelBufferIOSurfacePropertiesKey as String: [:],
         ]
