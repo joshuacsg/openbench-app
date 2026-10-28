@@ -76,7 +76,7 @@ public enum ControlMessage {
     case viewerTiming(frames: UInt32, clockErrMs: Double?, hostNetMs: Double?,
                       decodeMs: Double, renderMs: Double, glassMs: Double,
                       totalMs: Double?, totalP95Ms: Double?,
-                      worst: LatencyProbe.Sample, lowLatencyPresent: Bool)
+                      worst: LatencyProbe.Sample)
 
     case trackpadScroll(dx: Double, dy: Double, phase: TrackpadPhase, vx: Double, vy: Double)
     case trackpadGesture(kind: TrackpadGestureKind, phase: TrackpadPhase, delta: Double, velocity: Double)
@@ -147,13 +147,12 @@ public enum ControlMessage {
             dict = ["SetVideoPaused": ["paused": paused]]
         case .viewerTiming(let frames, let clockErrMs, let hostNetMs, let decodeMs,
                            let renderMs, let glassMs, let totalMs, let totalP95Ms,
-                           let worst, let lowLatencyPresent):
+                           let worst):
             var fields: [String: Any] = [
                 "frames": frames,
                 "decode_ms": decodeMs,
                 "render_ms": renderMs,
                 "glass_ms": glassMs,
-                "low_latency_present": lowLatencyPresent,
             ]
             var worstFields: [String: Any] = [
                 "decode_ms": worst.decode,

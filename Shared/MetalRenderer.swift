@@ -5,8 +5,6 @@
 //     a full frame of latency)
 //   - present on decode from a serial render queue, without a main-thread
 //     display-link tick before the compositor's own vsync
-//   - or, with lowLatencyPresent, a CAMetalDisplayLink at one frame of
-//     latency on its own thread, presenting the latest frame each refresh
 //
 // The input is a CVPixelBuffer (BGRA) from the VTDecompressionSession.
 // We create a Metal texture from it and blit to the drawable.
@@ -41,14 +39,6 @@ public final class MetalRenderer {
     private let renderQueue = DispatchQueue(label: "fastport.video.render", qos: .userInteractive)
     private let inFlight = DispatchSemaphore(value: 2)
     private let geometryLock = NSLock()
-
-    /// UserDefaults key for presenting through a display link.
-    public static let lowLatencyPresentKey = "display.lowLatencyPresent"
-    /// Under `lock`: frames wait for the display link instead of the
-    /// render queue.
-    private var usesDisplayLink = false
-    private var displayLink: CAMetalDisplayLink?
-    private var linkProxy: LinkProxy?
 
     public init?() {
         guard let device = MTLCreateSystemDefaultDevice(),
@@ -93,10 +83,7 @@ public final class MetalRenderer {
         }
         pendingBuffer = pixelBuffer
         pendingTimestampUs = timestampUs
-        let linked = usesDisplayLink
         lock.unlock()
-        // A display link asks for no update while the drawable is 0x0.
-        if linked { sizeDrawable(for: pixelBuffer) }
         presentIfNeeded()
     }
 
@@ -107,87 +94,12 @@ public final class MetalRenderer {
         stopped = true
         pendingBuffer = nil
         lock.unlock()
-        lowLatencyPresent = false
-    }
-
-    /// Present through a CAMetalDisplayLink at one frame of latency rather
-    /// than on arrival, where the 2026-10-28 iPad sessions measured ~16 ms
-    /// from submit to glass. A/B experiment, off by default: on macOS 26
-    /// (60 Hz display) the link targeted presentation 3 refreshes out and
-    /// glass rose from ~25 to ~50 ms; iOS is untested. Main thread only.
-    public var lowLatencyPresent = false {
-        didSet {
-            guard lowLatencyPresent != oldValue else { return }
-            displayLink?.invalidate()
-            displayLink = nil
-            linkProxy = nil
-            lock.lock()
-            usesDisplayLink = lowLatencyPresent
-            lock.unlock()
-            guard lowLatencyPresent else {
-                presentIfNeeded()
-                return
-            }
-            let link = CAMetalDisplayLink(metalLayer: metalLayer)
-            let proxy = LinkProxy(renderer: self)
-            link.delegate = proxy
-            link.preferredFrameLatency = 1
-            link.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 120, preferred: 120)
-            link.add(to: Self.linkRunLoop, forMode: .default)
-            displayLink = link
-            linkProxy = proxy
-        }
-    }
-
-    /// One shared thread whose run loop drives the display links, so a
-    /// busy main thread cannot delay a present.
-    private static let linkRunLoop: RunLoop = {
-        var loop: RunLoop?
-        let ready = DispatchSemaphore(value: 0)
-        let thread = Thread {
-            loop = RunLoop.current
-            // A port keeps run(mode:before:) from returning at once.
-            RunLoop.current.add(NSMachPort(), forMode: .default)
-            ready.signal()
-            while true { RunLoop.current.run(mode: .default, before: .distantFuture) }
-        }
-        thread.name = "fastport.video.displaylink"
-        thread.qualityOfService = .userInteractive
-        thread.start()
-        ready.wait()
-        return loop!
-    }()
-
-    private final class LinkProxy: NSObject, CAMetalDisplayLinkDelegate {
-        weak var renderer: MetalRenderer?
-        init(renderer: MetalRenderer) { self.renderer = renderer }
-        func metalDisplayLink(_ link: CAMetalDisplayLink, needsUpdate update: CAMetalDisplayLink.Update) {
-            renderer?.present(update)
-        }
-    }
-
-    /// Display-link callback: present the latest frame, if one arrived
-    /// since the last refresh and the GPU has room.
-    private func present(_ update: CAMetalDisplayLink.Update) {
-        guard inFlight.wait(timeout: .now()) == .success else { return }
-        lock.lock()
-        guard usesDisplayLink, let pb = pendingBuffer else {
-            lock.unlock()
-            inFlight.signal()
-            return
-        }
-        pendingBuffer = nil
-        let timestampUs = pendingTimestampUs
-        lock.unlock()
-        autoreleasepool {
-            if !encode(pb, timestampUs: timestampUs, into: update.drawable) { inFlight.signal() }
-        }
     }
 
     /// Schedule at most one drain, even if the GPU or drawable is busy.
     public func presentIfNeeded() {
         lock.lock()
-        guard pendingBuffer != nil, !presentationScheduled, !usesDisplayLink else {
+        guard pendingBuffer != nil, !presentationScheduled else {
             lock.unlock()
             return
         }
@@ -232,7 +144,19 @@ public final class MetalRenderer {
         var submitted = false
         defer { if !submitted { inFlight.signal() } }
 
-        sizeDrawable(for: sizing)
+        let width = CVPixelBufferGetWidth(sizing)
+        let height = CVPixelBufferGetHeight(sizing)
+
+        // Update the layer's drawable size if the frame resolution changed.
+        let drawableSize = CGSize(width: width, height: height)
+        geometryLock.lock()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        if metalLayer.drawableSize != drawableSize {
+            metalLayer.drawableSize = drawableSize
+        }
+        CATransaction.commit()
+        geometryLock.unlock()
 
         guard let drawable = metalLayer.nextDrawable() else { return }
         lock.lock()
@@ -243,24 +167,7 @@ public final class MetalRenderer {
         pendingBuffer = nil
         let timestampUs = pendingTimestampUs
         lock.unlock()
-        submitted = encode(pb, timestampUs: timestampUs, into: drawable)
-    }
 
-    /// Update the layer's drawable size if the frame resolution changed.
-    private func sizeDrawable(for pb: CVPixelBuffer) {
-        let drawableSize = CGSize(width: CVPixelBufferGetWidth(pb), height: CVPixelBufferGetHeight(pb))
-        geometryLock.lock()
-        defer { geometryLock.unlock() }
-        guard metalLayer.drawableSize != drawableSize else { return }
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        metalLayer.drawableSize = drawableSize
-        CATransaction.commit()
-    }
-
-    /// Blit `pb` into `drawable` and present it. True once committed; its
-    /// completion then releases one `inFlight` slot.
-    private func encode(_ pb: CVPixelBuffer, timestampUs: UInt64, into drawable: CAMetalDrawable) -> Bool {
         // Create a Metal texture from the CVPixelBuffer.
         var cvTexture: CVMetalTexture?
         let status = CVMetalTextureCacheCreateTextureFromImage(
@@ -277,12 +184,12 @@ public final class MetalRenderer {
         guard status == kCVReturnSuccess,
               let cvTexture = cvTexture,
               let sourceTexture = CVMetalTextureGetTexture(cvTexture) else {
-            return false
+            return
         }
 
         guard let commandBuffer = commandQueue.makeCommandBuffer(),
               let blitEncoder = commandBuffer.makeBlitCommandEncoder() else {
-            return false
+            return
         }
 
         // Blit from the source texture (decoded frame) to the drawable.
@@ -321,7 +228,7 @@ public final class MetalRenderer {
             }
         }
         commandBuffer.present(drawable)
+        submitted = true
         commandBuffer.commit()
-        return true
     }
 }

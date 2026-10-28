@@ -440,8 +440,7 @@ public final class StreamSession: ObservableObject {
                                   hostNetMs: s.hostNetMs, decodeMs: s.decodeMs,
                                   renderMs: s.renderMs, glassMs: s.glassMs,
                                   totalMs: s.totalMs, totalP95Ms: s.totalP95Ms,
-                                  worst: s.worst,
-                                  lowLatencyPresent: UserDefaults.standard.bool(forKey: MetalRenderer.lowLatencyPresentKey)))
+                                  worst: s.worst))
     }
 
     /// Called by the renderer when a frame reaches the glass.
