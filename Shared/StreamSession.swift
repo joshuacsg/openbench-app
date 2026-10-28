@@ -439,7 +439,9 @@ public final class StreamSession: ObservableObject {
         sendControl(.viewerTiming(frames: UInt32(clamping: s.frames), clockErrMs: s.clockErrMs,
                                   hostNetMs: s.hostNetMs, decodeMs: s.decodeMs,
                                   renderMs: s.renderMs, glassMs: s.glassMs,
-                                  totalMs: s.totalMs, totalP95Ms: s.totalP95Ms))
+                                  totalMs: s.totalMs, totalP95Ms: s.totalP95Ms,
+                                  worst: s.worst,
+                                  lowLatencyPresent: UserDefaults.standard.bool(forKey: MetalRenderer.lowLatencyPresentKey)))
     }
 
     /// Called by the renderer when a frame reaches the glass.

@@ -21,6 +21,7 @@ public struct StreamSettingsView: View {
     @AppStorage("stream.maxDimension") private var maxDimension: Int = 1920
     @AppStorage("stream.fps") private var fps: Int = 30
     @AppStorage("stream.bitrateKbps") private var bitrateKbps: Int = 5_000
+    @AppStorage(MetalRenderer.lowLatencyPresentKey) private var lowLatencyPresent = false
 
     public init(
         onApply: @escaping (_ fps: UInt32, _ bitrateKbps: UInt32, _ maxDimension: UInt32) -> Void
@@ -91,6 +92,11 @@ public struct StreamSettingsView: View {
                         }
                     }
                 }
+            }
+            Section("Display") {
+                // Viewer-only A/B: present through a display link at one
+                // frame of latency instead of on arrival.
+                Toggle("Low-latency present", isOn: $lowLatencyPresent)
             }
         } label: {
             Image(systemName: "gearshape")

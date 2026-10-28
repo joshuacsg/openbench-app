@@ -75,7 +75,8 @@ public enum ControlMessage {
     /// logs it. Capture-relative stages are nil without a clock offset.
     case viewerTiming(frames: UInt32, clockErrMs: Double?, hostNetMs: Double?,
                       decodeMs: Double, renderMs: Double, glassMs: Double,
-                      totalMs: Double?, totalP95Ms: Double?)
+                      totalMs: Double?, totalP95Ms: Double?,
+                      worst: LatencyProbe.Sample, lowLatencyPresent: Bool)
 
     case trackpadScroll(dx: Double, dy: Double, phase: TrackpadPhase, vx: Double, vy: Double)
     case trackpadGesture(kind: TrackpadGestureKind, phase: TrackpadPhase, delta: Double, velocity: Double)
@@ -145,13 +146,24 @@ public enum ControlMessage {
         case .setVideoPaused(let paused):
             dict = ["SetVideoPaused": ["paused": paused]]
         case .viewerTiming(let frames, let clockErrMs, let hostNetMs, let decodeMs,
-                           let renderMs, let glassMs, let totalMs, let totalP95Ms):
+                           let renderMs, let glassMs, let totalMs, let totalP95Ms,
+                           let worst, let lowLatencyPresent):
             var fields: [String: Any] = [
                 "frames": frames,
                 "decode_ms": decodeMs,
                 "render_ms": renderMs,
                 "glass_ms": glassMs,
+                "low_latency_present": lowLatencyPresent,
             ]
+            var worstFields: [String: Any] = [
+                "decode_ms": worst.decode,
+                "render_ms": worst.render,
+                "glass_ms": worst.glass,
+                "gap_ms": worst.gap,
+            ]
+            if let total = worst.total { worstFields["total_ms"] = total }
+            if let hostNet = worst.hostNet { worstFields["host_net_ms"] = hostNet }
+            fields["worst"] = worstFields
             if let clockErrMs { fields["clock_err_ms"] = clockErrMs }
             if let hostNetMs { fields["host_net_ms"] = hostNetMs }
             if let totalMs { fields["total_ms"] = totalMs }

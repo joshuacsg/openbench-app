@@ -15,7 +15,7 @@
 import Foundation
 import QuartzCore
 
-final class LatencyProbe {
+public final class LatencyProbe {
     struct Summary {
         var frames: Int
         var clockErrMs: Double?
@@ -25,19 +25,25 @@ final class LatencyProbe {
         var glassMs: Double
         var totalMs: Double?
         var totalP95Ms: Double?
+        /// The window's slowest frame.
+        var worst: Sample
     }
 
     private struct Stamps {
         var received: CFTimeInterval
+        /// Since the previous frame was reassembled.
+        var gap: CFTimeInterval
         var decoded: CFTimeInterval?
     }
 
-    private struct Sample {
-        var hostNet: Double?
-        var decode: Double
-        var render: Double
-        var glass: Double
-        var total: Double?
+    /// One frame's stages in ms; public because ViewerTiming carries one.
+    public struct Sample {
+        public var hostNet: Double?
+        public var decode: Double
+        public var render: Double
+        public var glass: Double
+        public var total: Double?
+        public var gap: Double
     }
 
     private let lock = NSLock()
@@ -46,6 +52,7 @@ final class LatencyProbe {
     private var offsets: [(offsetUs: Double, rtt: CFTimeInterval)] = []
     private var frames: [UInt64: Stamps] = [:]
     private var frameOrder: [UInt64] = []
+    private var lastReceived: CFTimeInterval?
     private var samples: [Sample] = []
     private var windowStart = CACurrentMediaTime()
 
@@ -73,7 +80,8 @@ final class LatencyProbe {
     func received(captureUs: UInt64, at: CFTimeInterval) {
         lock.lock(); defer { lock.unlock() }
         if frames[captureUs] == nil { frameOrder.append(captureUs) }
-        frames[captureUs] = Stamps(received: at)
+        frames[captureUs] = Stamps(received: at, gap: lastReceived.map { at - $0 } ?? 0)
+        lastReceived = at
         while frameOrder.count > Self.maxFrames {
             frames.removeValue(forKey: frameOrder.removeFirst())
         }
@@ -92,7 +100,8 @@ final class LatencyProbe {
                             decode: (decoded - stamps.received) * 1000,
                             render: (submitted - decoded) * 1000,
                             glass: (onGlass - submitted) * 1000,
-                            total: nil)
+                            total: nil,
+                            gap: stamps.gap * 1000)
         if let offset = bestOffset()?.offsetUs {
             let captured = (Double(captureUs) - offset) / 1_000_000
             let total = (onGlass - captured) * 1000
@@ -114,6 +123,11 @@ final class LatencyProbe {
         samples.removeAll(keepingCapacity: true)
         guard !window.isEmpty else { return nil }
         let totals = window.compactMap(\.total).sorted()
+        // By capture → glass when the clock offset is known, else by the
+        // viewer-only stages.
+        let worst = window.max {
+            ($0.total ?? $0.decode + $0.render + $0.glass) < ($1.total ?? $1.decode + $1.render + $1.glass)
+        }!
         let hostNets = window.compactMap(\.hostNet).sorted()
         return Summary(
             frames: window.count,
@@ -123,7 +137,8 @@ final class LatencyProbe {
             renderMs: Self.quantile(window.map(\.render).sorted(), 0.5) ?? 0,
             glassMs: Self.quantile(window.map(\.glass).sorted(), 0.5) ?? 0,
             totalMs: Self.quantile(totals, 0.5),
-            totalP95Ms: Self.quantile(totals, 0.95)
+            totalP95Ms: Self.quantile(totals, 0.95),
+            worst: worst
         )
     }
 
@@ -142,6 +157,7 @@ final class LatencyProbe {
         lock.lock(); defer { lock.unlock() }
         frames.removeAll()
         frameOrder.removeAll()
+        lastReceived = nil
         samples.removeAll()
         windowStart = CACurrentMediaTime()
     }
