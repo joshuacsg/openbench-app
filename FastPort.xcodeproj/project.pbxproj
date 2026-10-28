@@ -18,6 +18,7 @@
 		4066E3AEE4CF30E282BEB28D /* StreamSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C968512FB8608769C0CF2E /* StreamSession.swift */; };
 		4A1DBC6338B41B0C05A0DC29 /* TrustPromptView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 73B903556BC884D971276C62 /* TrustPromptView.swift */; };
 		5481ED36BAB1A677A7847691 /* MetalRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = DFC6E4B14A2CFB8A16DD5E26 /* MetalRenderer.swift */; };
+		9BC01731C4D1A2C2CB2B200C /* LatencyProbe.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02B61902A8EC21D352E9E8CB /* LatencyProbe.swift */; };
 		595D6E27D3EA66C0EFB68924 /* ClipboardManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8AB4C285A41288BBEBB4D319 /* ClipboardManager.swift */; };
 		5C84657AD59E15DB950B831B /* OpenBenchApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3FCB60695CAFA2342348BD0A /* OpenBenchApp.swift */; };
 		663BCCEA08EA7CD2A753BA8B /* InputManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 05E9258EB559C4E4AE42A3F6 /* InputManager.swift */; };
@@ -30,6 +31,7 @@
 		A1C0FFEE0000000000000001 /* HostControl.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C0FFEE0000000000000002 /* HostControl.swift */; };
 		8425F7EBAD9F10247F8CEB6D /* VideoDecoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = F288A358E2BC0C047EC292A5 /* VideoDecoder.swift */; };
 		86555B55DA55968869242195 /* MetalRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = DFC6E4B14A2CFB8A16DD5E26 /* MetalRenderer.swift */; };
+		D916348C31C565EA9F14767D /* LatencyProbe.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02B61902A8EC21D352E9E8CB /* LatencyProbe.swift */; };
 		8AE06985095B72C0EDF14D8A /* PasteModalView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3B5E0F9FAFD5DB1BFCFB8EC2 /* PasteModalView.swift */; };
 		9E777745F882F045D3568AB3 /* HostManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 46175A35F34B87EBA3CAA3A1 /* HostManager.swift */; };
 		A02AFDF6FF6E98692673E4C9 /* TrustPromptView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 73B903556BC884D971276C62 /* TrustPromptView.swift */; };
@@ -83,6 +85,7 @@
 		C1A624842B57F168268F7025 /* FrameReassembler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FrameReassembler.swift; sourceTree = "<group>"; };
 		DECFAD9C0261BB9243D29B35 /* OpenBenchViewer.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = OpenBenchViewer.entitlements; sourceTree = "<group>"; };
 		DFC6E4B14A2CFB8A16DD5E26 /* MetalRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetalRenderer.swift; sourceTree = "<group>"; };
+		02B61902A8EC21D352E9E8CB /* LatencyProbe.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LatencyProbe.swift; sourceTree = "<group>"; };
 		E75B33F4633DAB2E6F222E38 /* OpenBenchViewerApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenBenchViewerApp.swift; sourceTree = "<group>"; };
 		EA7F9CA14F9436841770CDCA /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		EC946EFDF21684CA8DE1F61A /* MinimapView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MinimapView.swift; sourceTree = "<group>"; };
@@ -173,6 +176,7 @@
 				C1A624842B57F168268F7025 /* FrameReassembler.swift */,
 				05E9258EB559C4E4AE42A3F6 /* InputManager.swift */,
 				DFC6E4B14A2CFB8A16DD5E26 /* MetalRenderer.swift */,
+				02B61902A8EC21D352E9E8CB /* LatencyProbe.swift */,
 				ACE9088A1B1B9733AC25F0E2 /* ServiceBrowser.swift */,
 				A1C968512FB8608769C0CF2E /* StreamSession.swift */,
 				DD0000FA57704700000000E1 /* SavedHosts.swift */,
@@ -315,6 +319,7 @@
 				6C1EF0439D83A59DA776073D /* FrameReassembler.swift in Sources */,
 				663BCCEA08EA7CD2A753BA8B /* InputManager.swift in Sources */,
 				86555B55DA55968869242195 /* MetalRenderer.swift in Sources */,
+				D916348C31C565EA9F14767D /* LatencyProbe.swift in Sources */,
 				A89F62E186D672E8B78311B5 /* MinimapView.swift in Sources */,
 				BB0000FA57704700000000B2 /* StreamSettingsView.swift in Sources */,
 				BB0000FA577047000000B002 /* PastePreviewTray.swift in Sources */,
@@ -346,6 +351,7 @@
 				3DF1DF642247304F0D3AD0AB /* InputManager.swift in Sources */,
 				D23359B904D5571AA21D20C8 /* KeyboardInputManager.swift in Sources */,
 				5481ED36BAB1A677A7847691 /* MetalRenderer.swift in Sources */,
+				9BC01731C4D1A2C2CB2B200C /* LatencyProbe.swift in Sources */,
 				6C7AADA4E6EF4FEF5A770435 /* MinimapView.swift in Sources */,
 				BB0000FA57704700000000B3 /* StreamSettingsView.swift in Sources */,
 				BB0000FA577047000000B003 /* PastePreviewTray.swift in Sources */,

@@ -5,6 +5,9 @@
 //     a full frame of latency)
 //   - present on decode from a serial render queue, without a main-thread
 //     display-link tick before the compositor's own vsync
+//   - on iOS, an idle display link that only asks for the panel's maximum
+//     refresh (holdsMaxRefreshRate), so ProMotion does not drop its rate
+//     on a 30 fps stream and make each present wait for a slower vsync
 //
 // The input is a CVPixelBuffer (BGRA) from the VTDecompressionSession.
 // We create a Metal texture from it and blit to the drawable.
@@ -26,6 +29,12 @@ public final class MetalRenderer {
 
     /// One latest-frame slot, rather than one queued closure per frame.
     private var pendingBuffer: CVPixelBuffer?
+    private var pendingTimestampUs: UInt64 = 0
+
+    /// Called from Metal's presented handler with the frame's capture
+    /// timestamp, when it was submitted and when it reached the glass
+    /// (CACurrentMediaTime seconds). Set before frames are enqueued.
+    public var onPresented: ((_ timestampUs: UInt64, _ submitted: CFTimeInterval, _ onGlass: CFTimeInterval) -> Void)?
     private let lock = NSLock()
 
     private var presentationScheduled = false
@@ -69,13 +78,14 @@ public final class MetalRenderer {
 
     /// Enqueue a decoded frame for immediate off-main presentation.
     /// Thread-safe; called from the decode callback.
-    public func enqueue(_ pixelBuffer: CVPixelBuffer) {
+    public func enqueue(_ pixelBuffer: CVPixelBuffer, timestampUs: UInt64 = 0) {
         lock.lock()
         guard !stopped else {
             lock.unlock()
             return
         }
         pendingBuffer = pixelBuffer
+        pendingTimestampUs = timestampUs
         lock.unlock()
         presentIfNeeded()
     }
@@ -87,7 +97,37 @@ public final class MetalRenderer {
         stopped = true
         pendingBuffer = nil
         lock.unlock()
+        #if os(iOS)
+        holdsMaxRefreshRate = false
+        #endif
     }
+
+    #if os(iOS)
+    /// UserDefaults key for the viewer's "hold 120 Hz" setting.
+    public static let holdMaxRefreshKey = "display.holdMaxRefresh"
+
+    private var refreshHold: CADisplayLink?
+
+    /// Keep the panel at its maximum refresh while this renderer is on
+    /// screen. Main thread only.
+    public var holdsMaxRefreshRate = false {
+        didSet {
+            guard holdsMaxRefreshRate != oldValue else { return }
+            refreshHold?.invalidate()
+            refreshHold = nil
+            guard holdsMaxRefreshRate else { return }
+            // The link retains its target, so give it one that is not us.
+            let link = CADisplayLink(target: RefreshHoldTarget(), selector: #selector(RefreshHoldTarget.tick))
+            link.preferredFrameRateRange = CAFrameRateRange(minimum: 80, maximum: 120, preferred: 120)
+            link.add(to: .main, forMode: .common)
+            refreshHold = link
+        }
+    }
+
+    private final class RefreshHoldTarget: NSObject {
+        @objc func tick() {}
+    }
+    #endif
 
     /// Schedule at most one drain, even if the GPU or drawable is busy.
     public func presentIfNeeded() {
@@ -125,12 +165,13 @@ public final class MetalRenderer {
                 return
             }
             pendingBuffer = nil
+            let timestampUs = pendingTimestampUs
             lock.unlock()
-            autoreleasepool { render(pb) }
+            autoreleasepool { render(pb, timestampUs: timestampUs) }
         }
     }
 
-    private func render(_ pb: CVPixelBuffer) {
+    private func render(_ pb: CVPixelBuffer, timestampUs: UInt64) {
         var submitted = false
         defer { if !submitted { inFlight.signal() } }
 
@@ -200,6 +241,13 @@ public final class MetalRenderer {
                 CVMetalTextureCacheFlush(cache, 0)
             }
             slots.signal()
+        }
+        if let onPresented {
+            let submittedAt = CACurrentMediaTime()
+            drawable.addPresentedHandler { d in
+                // 0 when the drawable was dropped instead of shown.
+                if d.presentedTime > 0 { onPresented(timestampUs, submittedAt, d.presentedTime) }
+            }
         }
         commandBuffer.present(drawable)
         submitted = true

@@ -1069,7 +1069,9 @@ struct StreamView: View {
             // Host pipeline delay (capture → encode done), shown only
             // when the host emits FrameTiming (FLUX_FRAME_TIMING set).
             let pd = pillSession.stats.hostPdMs.map { " · pd \(Int($0.rounded()))ms" } ?? ""
-            return "\(fps) fps\(rtt)\(pd)"
+            // Capture → on glass, once the host's Pong carries its clock.
+            let e2e = pillSession.stats.glassToGlassMs.map { " · e2e \(Int($0.rounded()))ms" } ?? ""
+            return "\(fps) fps\(rtt)\(pd)\(e2e)"
         case .connecting: return "Connecting…"
         case .disconnected: return "Disconnected"
         case .failed: return "Reconnecting…"
@@ -1195,16 +1197,23 @@ struct InputCaptureViewRepresentable: UIViewRepresentable {
 /// UIViewRepresentable that hosts the MetalRenderer's CAMetalLayer.
 struct MetalVideoView: UIViewRepresentable {
     @ObservedObject var session: StreamSession
+    @AppStorage(MetalRenderer.holdMaxRefreshKey) private var holdMaxRefresh = true
 
     func makeUIView(context: Context) -> MetalHostView {
         let view = MetalHostView()
-        session.onDecodedFrame = { [weak renderer = view.renderer] pb, _ in
-            renderer?.enqueue(pb)
+        view.renderer?.onPresented = { [weak session] ts, submitted, onGlass in
+            session?.framePresented(timestampUs: ts, submitted: submitted, onGlass: onGlass)
         }
+        session.onDecodedFrame = { [weak renderer = view.renderer] pb, ts in
+            renderer?.enqueue(pb, timestampUs: ts)
+        }
+        view.renderer?.holdsMaxRefreshRate = holdMaxRefresh
         return view
     }
 
-    func updateUIView(_ view: MetalHostView, context: Context) {}
+    func updateUIView(_ view: MetalHostView, context: Context) {
+        view.renderer?.holdsMaxRefreshRate = holdMaxRefresh
+    }
 
     class MetalHostView: UIView {
         var renderer: MetalRenderer?
@@ -1262,8 +1271,11 @@ struct MetalVideoView: NSViewRepresentable {
 
     func makeNSView(context: Context) -> MetalHostView {
         let view = MetalHostView()
-        session.onDecodedFrame = { [weak renderer = view.renderer] pb, _ in
-            renderer?.enqueue(pb)
+        view.renderer?.onPresented = { [weak session] ts, submitted, onGlass in
+            session?.framePresented(timestampUs: ts, submitted: submitted, onGlass: onGlass)
+        }
+        session.onDecodedFrame = { [weak renderer = view.renderer] pb, ts in
+            renderer?.enqueue(pb, timestampUs: ts)
         }
         return view
     }

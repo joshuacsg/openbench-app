@@ -70,6 +70,12 @@ public enum ControlMessage {
     case frameTiming(frameId: UInt64, captureUs: UInt64, encodeDoneUs: UInt64, sentUs: UInt64)
     /// Pause this viewer's host video pipeline while its video is hidden.
     case setVideoPaused(paused: Bool)
+    /// Viewer → host summary of the viewer's motion-to-photon stages
+    /// (RFC-0019), medians in ms over the last report window; the host
+    /// logs it. Capture-relative stages are nil without a clock offset.
+    case viewerTiming(frames: UInt32, clockErrMs: Double?, hostNetMs: Double?,
+                      decodeMs: Double, renderMs: Double, glassMs: Double,
+                      totalMs: Double?, totalP95Ms: Double?, holdMaxRefresh: Bool)
 
     case trackpadScroll(dx: Double, dy: Double, phase: TrackpadPhase, vx: Double, vy: Double)
     case trackpadGesture(kind: TrackpadGestureKind, phase: TrackpadPhase, delta: Double, velocity: Double)
@@ -138,6 +144,21 @@ public enum ControlMessage {
                                         "delta": delta, "velocity": velocity]]
         case .setVideoPaused(let paused):
             dict = ["SetVideoPaused": ["paused": paused]]
+        case .viewerTiming(let frames, let clockErrMs, let hostNetMs, let decodeMs,
+                           let renderMs, let glassMs, let totalMs, let totalP95Ms,
+                           let holdMaxRefresh):
+            var fields: [String: Any] = [
+                "frames": frames,
+                "decode_ms": decodeMs,
+                "render_ms": renderMs,
+                "glass_ms": glassMs,
+                "hold_max_refresh": holdMaxRefresh,
+            ]
+            if let clockErrMs { fields["clock_err_ms"] = clockErrMs }
+            if let hostNetMs { fields["host_net_ms"] = hostNetMs }
+            if let totalMs { fields["total_ms"] = totalMs }
+            if let totalP95Ms { fields["total_p95_ms"] = totalP95Ms }
+            dict = ["ViewerTiming": fields]
         }
         return try? JSONSerialization.data(withJSONObject: dict)
     }

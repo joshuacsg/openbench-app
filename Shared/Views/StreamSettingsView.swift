@@ -21,6 +21,9 @@ public struct StreamSettingsView: View {
     @AppStorage("stream.maxDimension") private var maxDimension: Int = 1920
     @AppStorage("stream.fps") private var fps: Int = 30
     @AppStorage("stream.bitrateKbps") private var bitrateKbps: Int = 5_000
+    #if os(iOS)
+    @AppStorage(MetalRenderer.holdMaxRefreshKey) private var holdMaxRefresh = true
+    #endif
 
     public init(
         onApply: @escaping (_ fps: UInt32, _ bitrateKbps: UInt32, _ maxDimension: UInt32) -> Void
@@ -92,6 +95,13 @@ public struct StreamSettingsView: View {
                     }
                 }
             }
+            #if os(iOS)
+            Section("Display") {
+                // Viewer-only: keeps ProMotion at 120 Hz while streaming
+                // so frames don't wait for a slower vsync.
+                Toggle("Hold 120 Hz", isOn: $holdMaxRefresh)
+            }
+            #endif
         } label: {
             Image(systemName: "gearshape")
                 .font(.caption)
